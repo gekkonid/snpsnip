@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=61", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -26,12 +26,14 @@ dynamic = ["version"]
 [project.scripts]
 snpsnip = "snpsnip:main"
 
+
 [tool.setuptools_scm]
 write_to = "snpsnip/_version.py"
 
 [tool.setuptools]
-packages = ["snpsnip"]
+packages = ["snpsnip", "snpsnip.templates"]
+include-package-data = true
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/snpsnip"
-"Bug Tracker" = "https://github.com/yourusername/snpsnip/issues"
+"Homepage" = "https://github.com/gekkonid/snpsnip"
+"Bug Tracker" = "https://github.com/gekkonid/snpsnip/issues"

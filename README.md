@@ -4,7 +4,7 @@ SNPSnip is a command-line tool with an interactive web interface for filtering V
 
 ### Prerequisites
 
-- Python 3.7 or higher
+- Python 3.8 or higher
 - bcftools must be installed and available in your PATH
 
 ### Install from source
