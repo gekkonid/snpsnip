@@ -27,6 +27,8 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from sklearn.decomposition import PCA
 from waitress import serve
 
+
+from ._version import __version__, __version_tuple__
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
