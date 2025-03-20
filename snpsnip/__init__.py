@@ -18,14 +18,18 @@ import threading
 import shlex
 import time
 import csv
+import multiprocessing
+import uuid
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 
 import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from sklearn.decomposition import PCA
 from waitress import serve
+from tqdm import tqdm
 
 
 from ._version import __version__, __version_tuple__
@@ -35,6 +39,43 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("snpsnip")
+
+# Standalone function for processing a region (needed for multiprocessing)
+def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = [], input_format: str = "-Ou"):
+    """
+    Process a single genomic region with bcftools.
+    
+    Args:
+        region: Genomic region string (e.g. "chr1:1000-2000")
+        input_file: Path to input VCF file
+        temp_dir: Directory for temporary output
+        pipeline_cmds: List of command lists to run in pipeline
+        check: Whether to check return codes
+        
+    Returns:
+        Path to output file or None if processing failed
+    """
+    region_safe = region.replace(":", "_").replace("-", "_")
+    region_output = os.path.join(temp_dir, f"region_{region_safe}.out")
+    
+    # Construct the command for this region
+    region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + pipeline_cmds
+    
+    # Convert command lists to strings
+    cmd_strings = [shlex.join(cmd) for cmd in region_cmd]
+    full_cmd = " | ".join(cmd_strings)
+    
+    # Run the command
+    logger.debug(f"Processing region {region}: {full_cmd}")
+    try:
+        with open(region_output, 'wb') as out_file:
+            subprocess.run(full_cmd, shell=True, check=check, stdout=out_file, stderr=subprocess.PIPE)
+        return region_output
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error processing region {region}: {e}")
+        if e.stderr:
+            logger.error(e.stderr)
+        return None
 
 # Constants
 DEFAULT_PORT = 2790
@@ -51,6 +92,8 @@ class SNPSnip:
         self.args = args
         self.vcf_file = args.vcf
         self.output_dir = Path(args.output_dir)
+        self.processes = args.processes
+        self.region_size = args.region_size
 
 
         if args.state_file:
@@ -280,6 +323,118 @@ class SNPSnip:
         full_cmd = ["bcftools"] + cmd
         return self._run_pipeline([full_cmd,], check=check, stdout=stdout)
     
+    def run_bcftools_pipeline(self, 
+                             input_file: str, 
+                             output_file: str, 
+                             pipeline_cmds: List[List[str]], 
+                             merge_cmd: List[str] = None,
+                             filters: List[str] = [],
+                             input_format: str = "-Ou",
+                             processes: int = None,
+                             check: bool = True) -> None:
+        """
+        Run a BCFtools pipeline in parallel by processing regions separately.
+        
+        Args:
+            input_file: Path to input VCF/BCF file
+            output_file: Path to output file
+            pipeline_cmds: List of commands to run in a pipeline
+            merge_cmd: Command to merge region outputs (defaults to bcftools concat for VCF, cat for text)
+            processes: Number of parallel processes (defaults to CPU count)
+            check: Whether to check return codes
+            
+        Returns:
+            None
+        """
+        if processes is None:
+            processes = self.processes if hasattr(self, 'processes') else max(1, multiprocessing.cpu_count() - 1)
+        
+        # Create a temporary directory for region outputs
+        temp_dir = Path(self.temp_dir) / f"regions_{uuid.uuid4().hex}"
+        temp_dir.mkdir(exist_ok=True)
+        temp_dir_str = str(temp_dir)
+        
+        # Get list of chromosomes and their lengths
+        contigs_cmd = ["bcftools", "index", "--stats", input_file]
+        logger.info(f"Getting contigs: {shlex.join(contigs_cmd)}")
+        result = subprocess.run(contigs_cmd, text=True, capture_output=True, check=check)
+        
+        regions = []
+        for line in result.stdout.strip().split('\n'):
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                chrom = parts[0]
+                length = int(parts[1])
+                
+                # Create regions of specified size
+                region_size = self.region_size if hasattr(self, 'region_size') else 1000000
+                for start in range(1, length, region_size):
+                    end = min(start + region_size - 1, length)
+                    regions.append(f"{chrom}:{start}-{end}")
+        
+        if not regions:
+            logger.warning("No regions found in the VCF file")
+            # Fall back to running without regions
+            self._run_pipeline([["bcftools", "view", input_format, input_file, *filters]] + pipeline_cmds, check=check, stdout=open(output_file, 'w'))
+            return
+        
+        logger.info(f"Processing {len(regions)} regions with {processes} processes")
+        
+        # Process regions in parallel using the standalone function
+        region_outputs = []
+        with ProcessPoolExecutor(max_workers=processes) as executor:
+            # Create a list of arguments for each region
+            futures = [
+                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format)
+                for region in regions
+            ]
+            
+            # Collect results as they complete
+            for future in tqdm(futures, total=len(futures), desc="Parallel VCF Processing", unit="region"):
+                result = future.result()
+                if result:
+                    region_outputs.append(str(result))
+        
+        if not region_outputs:
+            logger.error("All region processing failed")
+            return
+        
+        # Determine merge command if not provided
+        if merge_cmd is None:
+            # Check if output is likely VCF or text
+            is_vcf = any(output_file.endswith(ext) for ext in ['.vcf', '.vcf.gz', '.bcf'])
+            if is_vcf:
+                merge_cmd = ["bcftools", "concat", "-Oz", "--threads", str(processes), "--write-index", "-o", output_file]
+            else:
+                merge_cmd = ["cat"]
+        
+        # Merge the region outputs
+        merge_cmd_str = shlex.join(merge_cmd)
+        if "cat" in merge_cmd_str:
+            # For text outputs, just concatenate
+            with open(output_file, 'w') as out_file:
+                for region_file in region_outputs:
+                    with open(region_file, 'r') as in_file:
+                        out_file.write(in_file.read())
+        else:
+            # For VCF outputs, use the provided merge command
+            merge_cmd.extend(region_outputs)
+            logger.info(f"Merging outputs: {shlex.join(merge_cmd)}")
+            subprocess.run(merge_cmd, check=check)
+        
+        # Clean up temporary files
+        for file_path in region_outputs:
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                logger.debug(f"Failed to remove temporary file {file_path}: {e}")
+        try:
+            os.rmdir(temp_dir)
+        except OSError as e:
+            logger.debug(f"Failed to remove temporary directory {temp_dir}: {e}")
+    
     def _create_snp_subset(self):
         """Create a random subset of SNPs passing basic filters."""
         logger.info("Creating SNP subset...")
@@ -297,12 +452,16 @@ class SNPSnip:
 
         filled_vcf = str(self.temp_dir / "subset_filled.vcf.gz")
         commands = [
-           ["bcftools", "view", "-Ov", *filters, self.vcf_file], 
            ["awk", f'/^#/ {{print; next}} {{if (rand() < {self.subset_freq}) print}}'], 
-           ["bcftools", "+fill-tags", "-o", filled_vcf, '-Oz', "--write-index", "--", "-t", "all,F_MISSING"]
+           ["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING"]
         ]
-
-        self._run_pipeline(commands)
+        self.run_bcftools_pipeline(
+            input_file=self.vcf_file,
+            output_file=filled_vcf,
+            pipeline_cmds=commands,
+            filters=filters,
+            input_format="-Ov",
+        )
         
         self.state["subset_vcf"] = filled_vcf
     
@@ -317,10 +476,15 @@ class SNPSnip:
         samples = samples_result.stdout.strip().split('\n')
         
         # Compute per-sample missingness
-        missing_file = self.temp_dir / "vcf_stats.txt"
-        with open(missing_file, "w") as ofh:
-            self._run_bcftools(["stats", "-s", "-", subset_vcf], stdout=ofh)
+        missing_file = str(self.temp_dir / "vcf_stats.txt")
         
+        # Use parallel processing for stats calculation
+        self.run_bcftools_pipeline(
+            input_file=subset_vcf,
+            output_file=missing_file,
+            pipeline_cmds=[["bcftools", "stats", "-s", "-"]],
+            merge_cmd=["cat"],
+        )
         
         # Parse stats files
         sample_stats = {sample: {"id": sample} for sample in samples}
@@ -351,12 +515,15 @@ class SNPSnip:
         
         # Extract genotypes as a matrix
         geno_file = str(self.temp_dir / "genotypes.txt")
-        with open(geno_file, 'w') as ofh:
-            self._run_bcftools(
-                ["query", "-f", "[%GT\t]\n", subset_vcf],
-                check=False,
-                stdout=ofh
-            )
+        
+        # Use parallel processing for genotype extraction
+        self.run_bcftools_pipeline(
+            input_file=subset_vcf,
+            output_file=geno_file,
+            pipeline_cmds=[["bcftools", "query", "-f", "[%GT\t]\n"]],
+            merge_cmd=["cat"],
+            check=False
+        )
         
         # Get sample names
         samples_result = self._run_bcftools(["query", "-l", subset_vcf])
@@ -437,33 +604,59 @@ class SNPSnip:
             
             # Create a subset VCF with only these samples
             group_vcf = str(self.temp_dir / f"{group_name}_subset.vcf.gz")
-            self._run_pipeline([
-                    ["bcftools", "view", subset_vcf, "-S", sample_file, ],
-                    ["bcftools" "+fill-tags", "-Oz", "--write-index", "-o", group_vcf, "--", "-t", "all,F_MISSING"],
-            ])
+            
+            # Use parallel processing for sample subsetting
+            self.run_bcftools_pipeline(
+                input_file=subset_vcf,
+                output_file=group_vcf,
+                pipeline_cmds=[
+                    ["bcftools", "view", "-S", sample_file],
+                    ["bcftools", "+fill-tags", "-Ou", "--", "-t", "all,F_MISSING"]
+                ],
+            )
             
             # Compute variant statistics
             stats = {}
             
             # Quality
             qual_file = str(self.temp_dir / f"{group_name}_qual.txt")
-            with open(qual_file, 'w') as ofh:
-                self._run_bcftools(["query", "-f", "%QUAL\n", group_vcf], check=False, stdout=ofh)
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=qual_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%QUAL\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
             
             # Depth
             depth_file = str(self.temp_dir / f"{group_name}_depth.txt")
-            with open(depth_file, 'w') as ofh:
-                self._run_bcftools(["query", "-f", "%INFO/DP\n", group_vcf], check=False, stdout=ofh)
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=depth_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/DP\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
             
             # Allele frequency
             af_file = str(self.temp_dir / f"{group_name}_af.txt")
-            with open(af_file, 'w') as ofh:
-                self._run_bcftools(["query", "-f", "%INFO/AF\n", group_vcf], check=False, stdout=ofh)
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=af_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AF\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
             
             # Missing rate
             missing_file = str(self.temp_dir / f"{group_name}_missing.txt")
-            with open(missing_file, 'w') as ofh:
-                self._run_bcftools(["query", "-f", "%F_MISSING\n", group_vcf], check=False, stdout=ofh)
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=missing_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%F_MISSING\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
             
             # Parse statistics files
             try:
@@ -595,12 +788,20 @@ class SNPSnip:
             output_file = os.path.join(self.output_dir, f"{group_name}_filtered.vcf.gz")
             
             # Apply filters and extract samples
-            filter_cmd = ["view", self.vcf_file, "-S", sample_file, "-Oz", "-o", output_file]
+            pipeline_cmds = []
+            view_cmd = ["bcftools", "view", "-S", sample_file, "-Oz"]
             if filter_str:
-                filter_cmd.extend(["-i", filter_str])
+                view_cmd.extend(["-i", filter_str])
+            pipeline_cmds.append(view_cmd)
             
-            logger.info(f"Running filter command: {' '.join(filter_cmd)}")
-            self._run_bcftools(filter_cmd)
+            logger.info(f"Running filter command: {shlex.join(view_cmd)}")
+            
+            # Use parallel processing for final filtering
+            self.run_bcftools_pipeline(
+                input_file=self.vcf_file,
+                output_file=output_file,
+                pipeline_cmds=pipeline_cmds,
+            )
             
             # Index the output file
             self._run_bcftools(["index", output_file])
@@ -632,6 +833,10 @@ def main():
     parser.add_argument("--subset-freq", type=float, default=SUBSET_FREQ, 
                        help="Fraction of SNPs to sample for interactive analysis")
     parser.add_argument("--groups-file", help="CSV or TSV file with sample and group columns for predefined groups")
+    parser.add_argument("--processes", type=int, default=max(1, multiprocessing.cpu_count() - 1), 
+                       help="Number of parallel processes to use")
+    parser.add_argument("--region-size", type=int, default=1_000_000, 
+                       help="Size of each parallel region")
     
     args = parser.parse_args()
     
