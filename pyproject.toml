@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snpsnip"
-description = "Interactive VCF filtering tool"
+description = "An interactive VCF filtering tool"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}

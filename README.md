@@ -1,4 +1,4 @@
-# SNPSnip - Interactive VCF Filtering Tool
+# SNPSnip - An interactive VCF Filtering Tool
 
 SNPSnip is a command-line tool with an interactive web interface for filtering VCF files in multiple stages.
 

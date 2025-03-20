@@ -437,7 +437,10 @@ class SNPSnip:
             
             # Create a subset VCF with only these samples
             group_vcf = str(self.temp_dir / f"{group_name}_subset.vcf.gz")
-            self._run_bcftools(["view", subset_vcf, "-S", sample_file, "-Oz", "--write-index", "-o", group_vcf])
+            self._run_pipeline([
+                    ["bcftools", "view", subset_vcf, "-S", sample_file, ],
+                    ["bcftools" "+fill-tags", "-Oz", "--write-index", "-o", group_vcf, "--", "-t", "all,F_MISSING"],
+            ])
             
             # Compute variant statistics
             stats = {}
