@@ -807,12 +807,14 @@ class SNPSnip:
             output_file = os.path.join(self.output_dir, f"{group_name}_filtered.vcf.gz")
 
             # Apply filters and extract samples
-            pipeline_cmds = []
-            view_cmd = ["bcftools", "view", "-S", sample_file, "-Oz"]
+            pipeline_cmds = [
+                ["bcftools", "view", "-S", sample_file, "-Ou"],
+                ["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING,DP:1=int(sum(FORMAT/DP))"],
+            ]
+
             if filter_str:
-                view_cmd.extend(["-i", filter_str])
-            pipeline_cmds.append(view_cmd)
-            pipeline_cmds.append(["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING,DP:1=int(sum(FORMAT/DP))"])
+                view_cmd = ["bcftools", "view", "-Ou", "-i", filter_str]
+                pipeline_cmds.append(view_cmd)
 
             logger.info(f"Running filter command: {shlex.join(view_cmd)}")
 
@@ -821,6 +823,7 @@ class SNPSnip:
                 input_file=self.vcf_file,
                 output_file=output_file,
                 pipeline_cmds=pipeline_cmds,
+                check=True,
             )
 
             output_files.append(output_file)
