@@ -27,11 +27,17 @@
             background-color: #f9f9f9;
         }
         .pca-plot circle {
-            fill: steelblue;
+            stroke: steelblue;
+            stroke-width: 2px;
             opacity: 0.7;
         }
         .pca-plot circle.selected {
-            fill: orange;
+            stroke: orange;
+            stroke-width: 2px;
+            opacity: 0.7;
+        }
+        .pca-plot circle.filtered {
+            opacity: 0.2;
         }
         .pca-plot circle.highlighted {
             stroke: red;
@@ -145,6 +151,8 @@
                         <button id="clear-selection" class="btn btn-secondary">Clear Selection</button>
                         <button id="invert-selection" class="btn btn-info">Invert Selection</button>
                         <button id="select-unassigned" class="btn btn-warning">Select Unassigned</button>
+                        <button id="use-predefined-groups" class="btn btn-success" style="display: none;">Use Predefined Groups</button>
+                        <button id="merge-groups" class="btn btn-primary">Merge Groups</button>
                     </div>
                 </div>
             </div>
@@ -152,6 +160,19 @@
             <div id="sample-groups" class="mb-4">
                 <h3>Sample Groups</h3>
                 <div id="group-list"></div>
+                <div id="group-table-container" style="display: none;">
+                    <table id="group-table" class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Sample</th>
+                                <th>Group</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="group-table-body">
+                        </tbody>
+                    </table>
+                </div>
             </div>
             
             <button id="submit-sample-filters" class="btn btn-success btn-lg">Continue to Variant Filtering</button>
@@ -204,6 +225,74 @@
         </div>
     </div>
     
+    <!-- Single Sample Group Assignment Modal -->
+    <div class="modal fade" id="singleSampleModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Assign Sample to Group</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Assign sample <strong id="single-sample-name"></strong> to group:</p>
+                    <div class="mb-3">
+                        <select class="form-select" id="single-sample-group">
+                            <option value="">-- Select Group --</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="new-group-name" class="form-label">Or create new group:</label>
+                        <input type="text" class="form-control" id="new-group-name" placeholder="Enter a new group name">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="assign-sample">Assign</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Merge Groups Modal -->
+    <div class="modal fade" id="mergeGroupsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Merge Groups</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="source-group" class="form-label">Source Group:</label>
+                        <select class="form-select" id="source-group">
+                            <option value="">-- Select Group --</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="target-group" class="form-label">Target Group:</label>
+                        <select class="form-select" id="target-group">
+                            <option value="">-- Select Group --</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="merged-group-name" class="form-label">New Group Name (optional):</label>
+                        <input type="text" class="form-control" id="merged-group-name" placeholder="Leave empty to use target group name">
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="delete-source-group" checked>
+                        <label class="form-check-label" for="delete-source-group">
+                            Delete source group after merging
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="perform-merge">Merge Groups</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Global state
@@ -212,21 +301,29 @@
             pca: [],
             variantStats: {},
             sampleGroups: {},
+            predefinedGroups: {},
             selectedSamples: new Set(),
             thresholds: {
                 missingness: 0.1,
                 depth: 10
             },
-            variantThresholds: {}
+            variantThresholds: {},
+            filteredSamples: new Set(),
+            // Map of sample ID to group name
+            sampleToGroup: {}
         };
         
-        // Bootstrap modal
+        // Bootstrap modals
         let groupModal;
+        let singleSampleModal;
+        let mergeGroupsModal;
         
         // Initialize the application
         document.addEventListener('DOMContentLoaded', async () => {
-            // Initialize Bootstrap modal
+            // Initialize Bootstrap modals
             groupModal = new bootstrap.Modal(document.getElementById('groupNameModal'));
+            singleSampleModal = new bootstrap.Modal(document.getElementById('singleSampleModal'));
+            mergeGroupsModal = new bootstrap.Modal(document.getElementById('mergeGroupsModal'));
             
             // Set up event listeners
             document.getElementById('missingness-threshold').addEventListener('input', updateMissingnessThreshold);
@@ -238,6 +335,10 @@
             document.getElementById('save-group').addEventListener('click', saveGroup);
             document.getElementById('submit-sample-filters').addEventListener('click', submitSampleFilters);
             document.getElementById('submit-variant-filters').addEventListener('click', submitVariantFilters);
+            document.getElementById('use-predefined-groups').addEventListener('click', usePredefinedGroups);
+            document.getElementById('assign-sample').addEventListener('click', assignSingleSample);
+            document.getElementById('merge-groups').addEventListener('click', showMergeGroupsModal);
+            document.getElementById('perform-merge').addEventListener('click', mergeGroups);
             
             // Load application state
             await loadState();
@@ -251,6 +352,15 @@
                 const appState = await response.json();
                 
                 updateStageIndicator(appState.stage);
+                
+                // Store predefined groups if available
+                if (appState.predefined_groups) {
+                    state.predefinedGroups = appState.predefined_groups;
+                    // Show the "Use Predefined Groups" button if we have predefined groups
+                    if (Object.keys(state.predefinedGroups).length > 0) {
+                        document.getElementById('use-predefined-groups').style.display = 'inline-block';
+                    }
+                }
                 
                 if (appState.stage === 'ready_for_sample_filtering') {
                     await loadSampleFilteringData();
@@ -266,6 +376,19 @@
                 alert('Error loading application state. Please check the console for details.');
             } finally {
                 showLoading(false);
+            }
+        }
+        
+        // Update the sampleToGroup mapping based on current group assignments
+        function updateSampleToGroupMapping() {
+            // Clear the current mapping
+            state.sampleToGroup = {};
+            
+            // Create mapping from sample to group
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                for (const sample of samples) {
+                    state.sampleToGroup[sample] = groupName;
+                }
             }
         }
         
@@ -308,6 +431,9 @@
             renderMissingnessHistogram();
             renderDepthHistogram();
             renderPcaPlot();
+            
+            // Initialize filtered samples
+            updateFilteredSamples();
         }
         
         // Load data for variant filtering
@@ -493,6 +619,9 @@
         function renderPcaPlot() {
             const data = state.pca;
             
+            // Update the sample to group mapping
+            updateSampleToGroupMapping();
+            
             const width = 800;
             const height = 600;
             const margin = { top: 20, right: 150, bottom: 30, left: 40 }; // Increased right margin for legend
@@ -535,15 +664,13 @@
                 .attr('text-anchor', 'middle')
                 .text('PC2');
             
-            // Check if we have predefined groups
-            const hasGroups = data.length > 0 && data[0].hasOwnProperty('group');
+            // Get all unique groups from the current sample-to-group mapping
+            const groups = [...new Set(Object.values(state.sampleToGroup))].filter(Boolean);
+            const hasGroups = groups.length > 0;
             
-            // Create color scale for groups if needed
+            // Create color scale for groups
             let colorScale;
-            let groups = [];
-            
             if (hasGroups) {
-                groups = [...new Set(data.map(d => d.group))];
                 colorScale = d3.scaleOrdinal()
                     .domain(groups)
                     .range(d3.schemeCategory10);
@@ -557,14 +684,37 @@
                 .attr('cx', d => x(d.pc1))
                 .attr('cy', d => y(d.pc2))
                 .attr('r', 5)
-                .attr('fill', d => hasGroups ? colorScale(d.group) : 'steelblue')
-                .attr('class', d => state.selectedSamples.has(d.sample) ? 'selected' : '')
+                .attr('fill', d => {
+                    const group = state.sampleToGroup[d.sample];
+                    return group && hasGroups ? colorScale(group) : 'steelblue';
+                })
+                .attr('class', d => {
+                    let classes = [];
+                    if (state.selectedSamples.has(d.sample)) classes.push('selected');
+                    if (state.filteredSamples.has(d.sample)) classes.push('filtered');
+                    return classes.join(' ');
+                })
                 .on('click', function(event, d) {
-                    toggleSampleSelection(d.sample);
-                    d3.select(this).classed('selected', state.selectedSamples.has(d.sample));
+                    // If in brush mode, don't handle clicks on points
+                    if (brushMode) return;
+                    
+                    // Check if Shift key is pressed for multi-select
+                    if (event.shiftKey) {
+                        toggleSampleSelection(d.sample);
+                        d3.select(this).classed('selected', state.selectedSamples.has(d.sample));
+                    } else {
+                        // Single click without Shift opens the single sample assignment modal
+                        showSingleSampleModal(d.sample);
+                    }
+                    
+                    // Stop event propagation to prevent brush from activating
+                    event.stopPropagation();
                 })
                 .append('title')
-                .text(d => hasGroups ? `${d.sample} (${d.group})` : d.sample);
+                .text(d => {
+                    const group = state.sampleToGroup[d.sample];
+                    return group ? `${d.sample} (${group})` : d.sample;
+                });
             
             // Add legend if we have groups
             if (hasGroups && groups.length > 0) {
@@ -573,7 +723,7 @@
                 
                 legend.append('text')
                     .attr('x', 0)
-                    .attr('y', -10)
+                    .attr('y', -5)
                     .attr('font-weight', 'bold')
                     .text('Groups');
                 
@@ -593,14 +743,37 @@
                 });
             }
             
-            // Add brush for selection
+            // Add brush for selection, but only activate with shift key
+            let brushMode = false;
+            
             const brush = d3.brush()
                 .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]])
+                .on('start', () => {
+                    // Only allow brushing if in brush mode
+                    if (!brushMode) {
+                        svg.select('.brush').call(brush.move, null);
+                    }
+                })
                 .on('end', brushed);
             
-            svg.append('g')
+            const brushG = svg.append('g')
                 .attr('class', 'brush')
+                .style('display', 'none')
                 .call(brush);
+            
+            // Add brush toggle button
+            const brushButton = d3.select('#pca-plot')
+                .append('div')
+                .attr('class', 'mt-2')
+                .append('button')
+                .attr('class', 'btn btn-sm btn-outline-secondary')
+                .text('Toggle Selection Brush')
+                .on('click', () => {
+                    brushMode = !brushMode;
+                    brushG.style('display', brushMode ? 'block' : 'none');
+                    brushButton.classed('active', brushMode);
+                    brushButton.text(brushMode ? 'Exit Selection Mode' : 'Toggle Selection Brush');
+                });
             
             function brushed(event) {
                 if (!event.selection) return;
@@ -696,8 +869,12 @@
             // Save group
             state.sampleGroups[groupName] = Array.from(state.selectedSamples);
             
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
             // Update UI
             renderSampleGroups();
+            renderPcaPlot(); // Re-render PCA to show updated groups
             
             // Clear selection
             clearSelection();
@@ -708,61 +885,327 @@
         
         // Render sample groups
         function renderSampleGroups() {
-            const container = document.getElementById('group-list');
-            container.innerHTML = '';
+            const listContainer = document.getElementById('group-list');
+            const tableContainer = document.getElementById('group-table-container');
+            const tableBody = document.getElementById('group-table-body');
+            
+            // Clear containers
+            listContainer.innerHTML = '';
+            tableBody.innerHTML = '';
             
             if (Object.keys(state.sampleGroups).length === 0) {
-                container.innerHTML = '<div class="alert alert-info">No groups created yet. Use the PCA plot to select samples and create groups.</div>';
+                listContainer.innerHTML = '<div class="alert alert-info">No groups created yet. Use the PCA plot to select samples and create groups.</div>';
+                tableContainer.style.display = 'none';
                 return;
             }
             
+            // Hide the list view and show the table view
+            listContainer.style.display = 'none';
+            tableContainer.style.display = 'block';
+            
+            // Get all group names for the dropdown
+            const groupNames = Object.keys(state.sampleGroups);
+            
+            // Get all samples across all groups
+            const allSamples = new Set();
+            const sampleToGroup = {};
+            
             for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
-                const groupDiv = document.createElement('div');
-                groupDiv.className = 'group-container';
-                
-                const header = document.createElement('div');
-                header.className = 'group-header';
-                
-                const title = document.createElement('h4');
-                title.textContent = groupName;
-                
-                const count = document.createElement('span');
-                count.className = 'badge bg-primary';
-                count.textContent = `${samples.length} samples`;
-                
-                const deleteBtn = document.createElement('button');
-                deleteBtn.className = 'btn btn-sm btn-danger';
-                deleteBtn.textContent = 'Delete';
-                deleteBtn.onclick = () => deleteGroup(groupName);
-                
-                header.appendChild(title);
-                header.appendChild(count);
-                header.appendChild(deleteBtn);
-                
-                const sampleList = document.createElement('div');
-                sampleList.className = 'sample-list';
-                sampleList.style.maxHeight = '100px';
-                sampleList.style.overflow = 'auto';
-                
-                const sampleText = document.createElement('small');
-                sampleText.className = 'text-muted';
-                sampleText.textContent = samples.join(', ');
-                
-                sampleList.appendChild(sampleText);
-                
-                groupDiv.appendChild(header);
-                groupDiv.appendChild(sampleList);
-                
-                container.appendChild(groupDiv);
+                for (const sample of samples) {
+                    allSamples.add(sample);
+                    sampleToGroup[sample] = groupName;
+                }
             }
+            
+            // Sort samples alphabetically
+            const sortedSamples = Array.from(allSamples).sort();
+            
+            // Create table rows for each sample
+            for (const sample of sortedSamples) {
+                const row = document.createElement('tr');
+                
+                // Sample name cell
+                const nameCell = document.createElement('td');
+                nameCell.textContent = sample;
+                
+                // Group dropdown cell
+                const groupCell = document.createElement('td');
+                const groupSelect = document.createElement('select');
+                groupSelect.className = 'form-select form-select-sm';
+                groupSelect.dataset.sample = sample;
+                
+                // Add options for each group
+                for (const group of groupNames) {
+                    const option = document.createElement('option');
+                    option.value = group;
+                    option.textContent = group;
+                    option.selected = (sampleToGroup[sample] === group);
+                    groupSelect.appendChild(option);
+                }
+                
+                // Add change event
+                groupSelect.addEventListener('change', function() {
+                    reassignSample(sample, this.value);
+                });
+                
+                groupCell.appendChild(groupSelect);
+                
+                // Actions cell
+                const actionsCell = document.createElement('td');
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn btn-sm btn-danger';
+                removeBtn.textContent = 'Remove';
+                removeBtn.onclick = () => removeSampleFromGroups(sample);
+                
+                actionsCell.appendChild(removeBtn);
+                
+                // Add cells to row
+                row.appendChild(nameCell);
+                row.appendChild(groupCell);
+                row.appendChild(actionsCell);
+                
+                // Add row to table
+                tableBody.appendChild(row);
+            }
+        }
+        
+        // Reassign a sample to a different group
+        function reassignSample(sample, newGroup) {
+            // Remove sample from all groups
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                state.sampleGroups[groupName] = samples.filter(s => s !== sample);
+            }
+            
+            // Add to new group
+            if (!state.sampleGroups[newGroup]) {
+                state.sampleGroups[newGroup] = [];
+            }
+            state.sampleGroups[newGroup].push(sample);
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Re-render PCA to show updated groups
+            renderPcaPlot();
+        }
+        
+        // Remove a sample from all groups
+        function removeSampleFromGroups(sample) {
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                state.sampleGroups[groupName] = samples.filter(s => s !== sample);
+            }
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Re-render the table and PCA
+            renderSampleGroups();
+            renderPcaPlot();
         }
         
         // Delete group
         function deleteGroup(groupName) {
             if (confirm(`Are you sure you want to delete the group "${groupName}"?`)) {
                 delete state.sampleGroups[groupName];
+                
+                // Update sample to group mapping
+                updateSampleToGroupMapping();
+                
+                // Re-render the table and PCA
                 renderSampleGroups();
+                renderPcaPlot();
             }
+        }
+        
+        // Use predefined groups
+        function usePredefinedGroups() {
+            if (Object.keys(state.predefinedGroups).length === 0) {
+                alert('No predefined groups available');
+                return;
+            }
+            
+            if (confirm('This will replace any existing groups. Continue?')) {
+                // Get all samples that appear in the PCA
+                const pcaSamples = new Set(state.pca.map(d => d.sample));
+                
+                // Filter predefined groups to only include samples that appear in the PCA
+                const filteredGroups = {};
+                for (const [groupName, samples] of Object.entries(state.predefinedGroups)) {
+                    filteredGroups[groupName] = samples.filter(sample => pcaSamples.has(sample));
+                }
+                
+                state.sampleGroups = filteredGroups;
+                
+                // Update sample to group mapping
+                updateSampleToGroupMapping();
+                
+                // Re-render the table and PCA
+                renderSampleGroups();
+                renderPcaPlot();
+            }
+        }
+        
+        // Show single sample modal
+        function showSingleSampleModal(sampleName) {
+            // Set the sample name
+            document.getElementById('single-sample-name').textContent = sampleName;
+            
+            // Populate the group dropdown
+            const groupSelect = document.getElementById('single-sample-group');
+            groupSelect.innerHTML = '<option value="">-- Select Group --</option>';
+            
+            for (const groupName in state.sampleGroups) {
+                const option = document.createElement('option');
+                option.value = groupName;
+                option.textContent = groupName;
+                groupSelect.appendChild(option);
+            }
+            
+            // Clear the new group name field
+            document.getElementById('new-group-name').value = '';
+            
+            // Store the sample name for later use
+            singleSampleModal._sampleName = sampleName;
+            
+            // Show the modal
+            singleSampleModal.show();
+        }
+        
+        // Assign single sample to group
+        function assignSingleSample() {
+            const sampleName = singleSampleModal._sampleName;
+            const selectedGroup = document.getElementById('single-sample-group').value;
+            const newGroupName = document.getElementById('new-group-name').value.trim();
+            
+            if (!selectedGroup && !newGroupName) {
+                alert('Please select an existing group or enter a new group name');
+                return;
+            }
+            
+            // Remove sample from all existing groups
+            for (const groupName in state.sampleGroups) {
+                state.sampleGroups[groupName] = state.sampleGroups[groupName].filter(s => s !== sampleName);
+            }
+            
+            // Add to selected group or create new group
+            const targetGroup = newGroupName || selectedGroup;
+            
+            if (!state.sampleGroups[targetGroup]) {
+                state.sampleGroups[targetGroup] = [];
+            }
+            
+            state.sampleGroups[targetGroup].push(sampleName);
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Update UI
+            renderSampleGroups();
+            renderPcaPlot();
+            
+            // Hide modal
+            singleSampleModal.hide();
+        }
+        
+        // Show merge groups modal
+        function showMergeGroupsModal() {
+            // Filter to only groups that have samples
+            const groupsWithSamples = Object.entries(state.sampleGroups)
+                .filter(([_, samples]) => samples.length > 0)
+                .map(([groupName, _]) => groupName);
+            
+            if (groupsWithSamples.length < 2) {
+                alert('You need at least two groups with samples to merge.');
+                return;
+            }
+            
+            // Populate source group dropdown
+            const sourceSelect = document.getElementById('source-group');
+            sourceSelect.innerHTML = '<option value="">-- Select Group --</option>';
+            
+            // Populate target group dropdown
+            const targetSelect = document.getElementById('target-group');
+            targetSelect.innerHTML = '<option value="">-- Select Group --</option>';
+            
+            for (const groupName of groupsWithSamples) {
+                // Add to source dropdown
+                const sourceOption = document.createElement('option');
+                sourceOption.value = groupName;
+                sourceOption.textContent = `${groupName} (${state.sampleGroups[groupName].length} samples)`;
+                sourceSelect.appendChild(sourceOption);
+                
+                // Add to target dropdown
+                const targetOption = document.createElement('option');
+                targetOption.value = groupName;
+                targetOption.textContent = `${groupName} (${state.sampleGroups[groupName].length} samples)`;
+                targetSelect.appendChild(targetOption);
+            }
+            
+            // Clear the merged group name field
+            document.getElementById('merged-group-name').value = '';
+            
+            // Reset the delete source checkbox
+            document.getElementById('delete-source-group').checked = true;
+            
+            // Show the modal
+            mergeGroupsModal.show();
+        }
+        
+        // Merge groups
+        function mergeGroups() {
+            const sourceGroup = document.getElementById('source-group').value;
+            const targetGroup = document.getElementById('target-group').value;
+            const newGroupName = document.getElementById('merged-group-name').value.trim();
+            const deleteSource = document.getElementById('delete-source-group').checked;
+            
+            if (!sourceGroup || !targetGroup) {
+                alert('Please select both source and target groups');
+                return;
+            }
+            
+            if (sourceGroup === targetGroup) {
+                alert('Source and target groups must be different');
+                return;
+            }
+            
+            // Get samples from both groups
+            const sourceSamples = state.sampleGroups[sourceGroup] || [];
+            const targetSamples = state.sampleGroups[targetGroup] || [];
+            
+            // Create a set to avoid duplicates
+            const mergedSamples = new Set([...targetSamples, ...sourceSamples]);
+            
+            // Determine the final group name
+            const finalGroupName = newGroupName || targetGroup;
+            
+            // Create or update the target group
+            state.sampleGroups[finalGroupName] = Array.from(mergedSamples);
+            
+            // If using a new name and not deleting source, also delete target
+            if (newGroupName && newGroupName !== targetGroup && newGroupName !== sourceGroup) {
+                if (deleteSource) {
+                    delete state.sampleGroups[sourceGroup];
+                }
+                delete state.sampleGroups[targetGroup];
+            } 
+            // If using target name and deleting source
+            else if (deleteSource && finalGroupName === targetGroup) {
+                delete state.sampleGroups[sourceGroup];
+            }
+            // If using source name
+            else if (finalGroupName === sourceGroup) {
+                delete state.sampleGroups[targetGroup];
+            }
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Update UI
+            renderSampleGroups();
+            renderPcaPlot();
+            
+            // Hide modal
+            mergeGroupsModal.hide();
         }
         
         // Update missingness threshold
@@ -775,6 +1218,9 @@
             d3.select('#missingness-histogram .threshold-line')
                 .attr('x1', state.missingnessScale(value))
                 .attr('x2', state.missingnessScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
         }
         
         // Update depth threshold
@@ -787,6 +1233,27 @@
             d3.select('#depth-histogram .threshold-line')
                 .attr('x1', state.depthScale(value))
                 .attr('x2', state.depthScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update filtered samples based on thresholds
+        function updateFilteredSamples() {
+            state.filteredSamples.clear();
+            
+            state.sampleStats.forEach(sample => {
+                const missingRate = sample.missing_rate || 0;
+                const meanDepth = sample.mean_depth || 0;
+                
+                if (missingRate > state.thresholds.missingness || meanDepth < state.thresholds.depth) {
+                    state.filteredSamples.add(sample.id);
+                }
+            });
+            
+            // Update PCA plot to show filtered samples with low opacity
+            d3.selectAll('#pca-plot circle')
+                .classed('filtered', d => state.filteredSamples.has(d.sample));
         }
         
         // Submit sample filters

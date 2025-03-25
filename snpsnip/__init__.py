@@ -131,7 +131,7 @@ class SNPSnip:
 
         # Load predefined groups if provided
         if args.groups_file:
-            self._load_groups_from_file(args.groups_file)
+            self._load_groups_from_file(args.groups_file, args.group_column, args.sample_column)
 
         # Create directories if they don't exist
         self.output_dir.mkdir(exist_ok=True)
@@ -157,7 +157,7 @@ class SNPSnip:
         with open(self.state_file, 'w') as f:
             json.dump(self.state, f, indent=2)
 
-    def _load_groups_from_file(self, groups_file: str):
+    def _load_groups_from_file(self, groups_file: str, group_column: str="group", sample_column: str = "sample"):
         """Load sample groups from a CSV or TSV file."""
         logger.info(f"Loading sample groups from {groups_file}")
 
@@ -168,16 +168,21 @@ class SNPSnip:
         try:
             with open(groups_file, 'r') as f:
                 reader = csv.DictReader(f, delimiter=delimiter)
-                if 'sample' not in reader.fieldnames and 'group' not in reader.fieldnames:
-                    logger.error(f"Groups file must contain 'sample' and 'group' columns. Found: {reader.fieldnames}")
+                if sample_column not in reader.fieldnames and group_column not in reader.fieldnames:
+                    logger.error(f"Groups file must contain '{sample_column}' and '{group_column}' columns. Found: {reader.fieldnames}")
                     return
 
                 for row in reader:
-                    sample = row['sample']
-                    group = row['group']
-                    if group not in groups:
-                        groups[group] = []
-                    groups[group].append(sample)
+                    try:
+                        sample = row[sample_column]
+                        group = row[group_column]
+                        if group not in groups:
+                            groups[group] = []
+                        groups[group].append(sample)
+                    except KeyError as e:
+                        print(f"Strange line: {row}: {str(e)}")
+                        raise e
+
 
             self.state["predefined_groups"] = groups
             self.state["sample_groups"] = groups.copy()
@@ -215,18 +220,6 @@ class SNPSnip:
         @app.route('/api/pca')
         def get_pca():
             if "pca" in self.state:
-                # Add group information if available
-                if self.state.get("predefined_groups") and self.state["pca"]:
-                    # Create a mapping from sample to group
-                    sample_to_group = {}
-                    for group, samples in self.state["predefined_groups"].items():
-                        for sample in samples:
-                            sample_to_group[sample] = group
-
-                    # Add group information to PCA data
-                    for point in self.state["pca"]:
-                        point["group"] = sample_to_group.get(point["sample"], "unassigned")
-
                 return jsonify(self.state["pca"])
             return jsonify({"error": "PCA not available"}), 404
 
@@ -371,8 +364,13 @@ class SNPSnip:
                 continue
             parts = line.split('\t')
             if len(parts) >= 2:
-                chrom = parts[0]
-                length = int(parts[1])
+                try:
+                    chrom = parts[0]
+                    length = int(parts[1])
+                except ValueError as exc:
+                    print(f"ERROR parsing chrom length from vcf header: {line}")
+                    regions.append(chrom)
+                    continue
 
                 # Create regions of specified size
                 region_size = self.region_size if hasattr(self, 'region_size') else 1000000
@@ -853,6 +851,8 @@ def main():
     parser.add_argument("--subset-freq", type=float, default=SUBSET_FREQ,
                        help="Fraction of SNPs to sample for interactive analysis")
     parser.add_argument("--groups-file", help="CSV or TSV file with sample and group columns for predefined groups")
+    parser.add_argument("--group-column", default="group", help="Column in CSV or TSV file for predefined groups")
+    parser.add_argument("--sample-column", default="sample", help="CSV or TSV file for sample")
     parser.add_argument("--processes", type=int, default=max(1, multiprocessing.cpu_count() - 1),
                        help="Number of parallel processes to use")
     parser.add_argument("--region-size", type=int, default=1_000_000,
