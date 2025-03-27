@@ -60,8 +60,8 @@ You can also run this in an "offline" mode, useful for example on clusters
 snpsnip --vcf input.vcf.gz --offline
 
 # This generates a static HTML file you can download & play with to set your
-# thresholds. This saves a .json file to your PC. Copy that file back to
-# wherever you're running SNPsnip, then:
+# thresholds. Then, you save a .json file to your PC and then copy that file
+# back to wherever you're running SNPsnip, then:
 
 snpsnip --vcf input.vcf.gz --offline --next snpsnip_sample_filters.json
 
