@@ -5,7 +5,7 @@ SNPSnip is a command-line tool with an interactive web interface for filtering V
 ### Prerequisites
 
 - Python 3.8 or higher
-- bcftools must be installed and available in your PATH
+- bcftools 1.18 or higher must be installed and available in your PATH (check with `bcftools --version`, a statically compiled version is [available here](https://github.com/kdm9/static_samtools_bcftools/releases/latest))
 
 ### Install from source
 
@@ -15,10 +15,12 @@ pip install git+https://github.com/gekkonid/snpsnip.git
 
 ## Usage
 
+
 ### Online mode
 
 ```bash
-snpsnip --output-dir filtered_results --vcf input.vcf.gz --maf 0.05 --max-missing 0.1 --min-qual 30
+snpsnip --output-dir filtered_results --vcf input.vcf.gz \
+    --maf 0.05 --max-missing 0.1 --min-qual 30
 ```
 
 This will conduct three phases of analysis, with a web UI to select threholds etc between these steps.
@@ -27,7 +29,10 @@ This will conduct three phases of analysis, with a web UI to select threholds et
    basic filters, and calculates per-sample stats and a sample PCA. You will be
    then presented with a web UI where you can set your sample filtering
    thresholds to exclude poor samples and (optionally) create subsets of
-   samples.
+   samples. You can also specify absolute minimum thresholds on MAF,
+   missingness, and variant quality to subset the variants that are considered,
+   which is useful if you have a very large number of singleton or poor quality
+   variants (use `--maf`, `--max-missing`, `--min-qual` for this).
 3. **Variant Filtering**: For each sample group, SNPSnip will then calculate
    variant-level statistics from the random subset of SNPs (from step 1). You
    can then set your thresholds per-group to exclude poor SNPs.
@@ -63,9 +68,8 @@ snpsnip --vcf input.vcf.gz --offline --next snpsnip_variant_filters.json
 # This will generate the final files.
 ```
 
-## Workflow
-
-
 ## License
 
-MPL2
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at http://mozilla.org/MPL/2.0/.
