@@ -7,14 +7,21 @@ SNPSnip is a command-line tool with an interactive web interface for filtering V
 - Python 3.8 or higher
 - bcftools 1.18 or higher must be installed and available in your PATH (check with `bcftools --version`, a statically compiled version is [available here](https://github.com/kdm9/static_samtools_bcftools/releases/latest))
 
-### Install from source
+### Install
+
+```bash
+pip install snpsnip
+```
+
+Or from the latest source: 
 
 ```bash
 pip install git+https://github.com/gekkonid/snpsnip.git
 ```
 
-## Usage
+I recommend using [`pipx`](https://pipx.pypa.io/latest/) to install tools like this, to isolate tool dependencies.
 
+## Usage
 
 ### Online mode
 
