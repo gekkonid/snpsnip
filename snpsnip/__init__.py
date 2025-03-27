@@ -4,6 +4,7 @@ SNPSnip - Interactive VCF filtering tool
 
 This tool provides an interactive web interface for filtering VCF files
 in multiple stages, with checkpointing to allow resuming sessions.
+It can operate in both online (API-based) and offline (static HTML) modes.
 """
 
 import argparse
@@ -21,6 +22,7 @@ import time
 import csv
 import multiprocessing
 import uuid
+import base64
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, Callable
@@ -31,6 +33,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from sklearn.decomposition import PCA
 from waitress import serve
 from tqdm import tqdm
+import jinja2
 
 
 from ._version import __version__, __version_tuple__
@@ -42,7 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger("snpsnip")
 
 # Standalone function for processing a region (needed for multiprocessing)
-def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou"):
+def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True):
     """
     Process a single genomic region with bcftools.
 
@@ -57,12 +60,17 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
         Path to output file or None if processing failed
     """
     region_safe = region.replace(":", "_").replace("-", "_")
-    region_output = os.path.join(temp_dir, f"region_{region_safe}.out")
+    ext = "bcf" if vcf_out else "txt"
+    region_output = os.path.join(temp_dir, f"region_{region_safe}.{ext}")
 
     if filters is None:
         filters = []
     # Construct the command for this region
     region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + pipeline_cmds
+    if vcf_out:
+        region_cmd.append(
+            ["bcftools", "view", "-Ob1", "--write-index", "-o", region_output]
+        )
 
     # Convert command lists to strings
     cmd_strings = [shlex.join(cmd) for cmd in region_cmd]
@@ -71,8 +79,11 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
     # Run the command
     logger.debug(f"Processing region {region}: {full_cmd}")
     try:
-        with open(region_output, 'wb') as out_file:
-            subprocess.run(full_cmd, shell=True, check=check, stdout=out_file, stderr=subprocess.PIPE)
+        if vcf_out:
+            subprocess.run(full_cmd, shell=True, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        else:
+            with open(region_output, 'wb') as out_file:
+                subprocess.run(full_cmd, shell=True, check=check, stdout=out_file, stderr=subprocess.PIPE)
         return region, region_output
     except subprocess.CalledProcessError as e:
         logger.error(f"Error processing region {region}: {e}")
@@ -97,7 +108,8 @@ class SNPSnip:
         self.output_dir = Path(args.output_dir)
         self.processes = args.processes
         self.region_size = args.region_size
-
+        self.offline_mode = args.offline
+        self.next_file = args.next
 
         if args.state_file:
             self.state_file = Path(args.state_file)
@@ -129,6 +141,10 @@ class SNPSnip:
             "predefined_groups": {}
         }
 
+        # If next file is provided, load it and update state
+        if self.next_file and os.path.exists(self.next_file):
+            self._load_next_file()
+
         # Load predefined groups if provided
         if args.groups_file:
             self._load_groups_from_file(args.groups_file, args.group_column, args.sample_column)
@@ -137,8 +153,8 @@ class SNPSnip:
         self.output_dir.mkdir(exist_ok=True)
         self.temp_dir.mkdir(exist_ok=True)
 
-        # Web app
-        self.app = self._create_app()
+        # Web app (only created in online mode)
+        self.app = self._create_app() if not self.offline_mode else None
         self.server_thread = None
 
     def _load_state(self) -> Optional[Dict]:
@@ -151,6 +167,31 @@ class SNPSnip:
                 logger.warning(f"Could not parse state file {self.state_file}")
                 return None
         return None
+
+    def _load_next_file(self):
+        """Load data from a next file (downloaded from previous step)."""
+        try:
+            with open(self.next_file, 'r') as f:
+                next_data = json.load(f)
+                
+            # Update state based on the stage
+            if "groups" in next_data:
+                # This is from sample filtering
+                self.state["sample_groups"] = next_data["groups"]
+                self.state["stage"] = "sample_filtered"
+                logger.info(f"Loaded sample groups from {self.next_file}")
+            elif "thresholds" in next_data:
+                # This is from variant filtering
+                self.state["filter_thresholds"] = next_data["thresholds"]
+                self.state["stage"] = "ready_for_final"
+                logger.info(f"Loaded variant thresholds from {self.next_file}")
+            else:
+                logger.warning(f"Unrecognized format in next file: {self.next_file}")
+                
+            self._save_state()
+        except Exception as e:
+            logger.error(f"Error loading next file {self.next_file}: {e}")
+            raise
 
     def _save_state(self):
         """Save current state to state file."""
@@ -183,7 +224,7 @@ class SNPSnip:
                         print(f"Strange line: {row}: {str(e)}")
                         raise e
 
-
+            # Store all predefined groups
             self.state["predefined_groups"] = groups
             self.state["sample_groups"] = groups.copy()
             logger.info(f"Loaded {len(groups)} groups with {sum(len(samples) for samples in groups.values())} samples")
@@ -192,18 +233,30 @@ class SNPSnip:
             raise e
 
     def _create_app(self) -> Flask:
-        """Create Flask app for the web interface."""
+        """Create Flask app for the web interface (online mode only)."""
         app = Flask(__name__,
                    static_folder=str(Path(__file__).parent / "static"),
                    template_folder=str(Path(__file__).parent / "templates"))
 
         @app.route('/')
         def index():
-            return render_template('index.html', state=self.state)
+            return render_template('index.html', state=self.state, offline_mode=False)
 
         @app.route('/api/state')
         def get_state():
-            return jsonify(self.state)
+            # Filter out predefined groups with no samples
+            state_copy = self.state.copy()
+            if "predefined_groups" in state_copy:
+                state_copy["predefined_groups"] = {
+                    group: samples for group, samples in state_copy["predefined_groups"].items() 
+                    if samples
+                }
+            if "sample_groups" in state_copy:
+                state_copy["sample_groups"] = {
+                    group: samples for group, samples in state_copy["sample_groups"].items() 
+                    if samples
+                }
+            return jsonify(state_copy)
 
         @app.route('/api/sample_stats')
         def get_sample_stats():
@@ -248,6 +301,68 @@ class SNPSnip:
             return jsonify({"success": True, "output_files": self.state.get("output_files", [])})
 
         return app
+        
+    def _generate_static_html(self, stage):
+        """Generate static HTML file with embedded data for offline mode."""
+        template_path = Path(__file__).parent / "templates" / "index.html"
+        
+        # Load the template
+        with open(template_path, 'r') as f:
+            template_content = f.read()
+            
+        # Create Jinja2 environment and template
+        env = jinja2.Environment()
+        template = env.from_string(template_content)
+        
+        # Prepare data to embed in the HTML
+        embedded_data = {
+            "offline_mode": True,
+            "stage": stage
+        }
+        
+        if stage == "ready_for_sample_filtering":
+            # Embed sample stats and PCA data
+            embedded_data["sample_stats"] = self.state["sample_stats"]
+            embedded_data["pca"] = self.state["pca"]
+            
+            # Filter out predefined groups with no samples
+            predefined_groups = {
+                group: samples for group, samples in self.state.get("predefined_groups", {}).items() 
+                if samples
+            }
+            sample_groups = {
+                group: samples for group, samples in self.state.get("sample_groups", {}).items() 
+                if samples
+            }
+            embedded_data["predefined_groups"] = predefined_groups
+            embedded_data["sample_groups"] = sample_groups
+            output_file = self.output_dir / "sample_filtering.html"
+            
+        elif stage == "ready_for_variant_filtering":
+            # Embed variant stats and sample groups
+            embedded_data["sample_groups"] = self.state["sample_groups"]
+            embedded_data["variant_stats"] = self.state["variant_stats"]
+            output_file = self.output_dir / "variant_filtering.html"
+        elif stage == "completed":
+            # No html output for completion
+            return None
+        else:
+            logger.error(f"Unknown stage for static HTML generation: {stage}")
+            return None
+            
+        # Render the template with embedded data
+        html_content = template.render(
+            state=self.state,
+            offline_mode=True,
+            embedded_data=json.dumps(embedded_data)
+        )
+        
+        # Write to file
+        with open(output_file, 'w') as f:
+            f.write(html_content)
+            
+        logger.info(f"Generated static HTML file: {output_file}")
+        return output_file
 
     def run(self):
         """Main execution flow."""
@@ -270,10 +385,36 @@ class SNPSnip:
             self.state["completed"] = True
             self._save_state()
 
-        # Start web server if not completed
-        if not self.state.get("completed", False):
-            self._start_web_server()
+        # Handle offline or online mode
+        if self.offline_mode:
+            self._handle_offline_mode()
         else:
+            # Start web server if not completed in online mode
+            if not self.state.get("completed", False):
+                self._start_web_server()
+            else:
+                logger.info("Processing completed. Output files:")
+                for file in self.state.get("output_files", []):
+                    logger.info(f"  - {file}")
+                    
+    def _handle_offline_mode(self):
+        """Handle offline mode by generating appropriate static HTML files."""
+        if self.state["stage"] == "ready_for_sample_filtering":
+            # Generate HTML for sample filtering
+            html_file = self._generate_static_html("ready_for_sample_filtering")
+            logger.info(f"Generated sample filtering HTML: {html_file}")
+            logger.info("Open this file in a browser, make your selections, and download the JSON file.")
+            logger.info("Then run: snpsnip --vcf <vcf_file> --offline --next <downloaded_json>")
+            
+        elif self.state["stage"] == "ready_for_variant_filtering":
+            # Generate HTML for variant filtering
+            html_file = self._generate_static_html("ready_for_variant_filtering")
+            logger.info(f"Generated variant filtering HTML: {html_file}")
+            logger.info("Open this file in a browser, make your selections, and download the JSON file.")
+            logger.info("Then run: snpsnip --vcf <vcf_file> --offline --next <downloaded_json>")
+            
+        elif self.state.get("completed", False):
+            # Generate completion HTML
             logger.info("Processing completed. Output files:")
             for file in self.state.get("output_files", []):
                 logger.info(f"  - {file}")
@@ -389,12 +530,21 @@ class SNPSnip:
 
         logger.info(f"Processing {len(regions)} regions with {processes} processes")
 
+        # Determine merge command if not provided
+        is_vcf = any(output_file.endswith(ext) for ext in ['.vcf', '.vcf.gz', '.bcf'])
+        if merge_cmd is None:
+            # Check if output is likely VCF or text
+            if is_vcf:
+                merge_cmd = ["bcftools", "concat", "--allow-overlaps", "--verbose", "0", out_format, "--threads", str(processes), "--write-index", "-o", output_file]
+            else:
+                merge_cmd = ["cat"]
+
         # Process regions in parallel using the standalone function
         region_outputs = {}
         with ProcessPoolExecutor(max_workers=processes) as executor:
             # Create a list of arguments for each region
             futures = [
-                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format)
+                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf)
                 for region in regions
             ]
 
@@ -407,15 +557,6 @@ class SNPSnip:
         if not region_outputs:
             logger.error("All region processing failed")
             return
-
-        # Determine merge command if not provided
-        is_vcf = any(output_file.endswith(ext) for ext in ['.vcf', '.vcf.gz', '.bcf'])
-        if merge_cmd is None:
-            # Check if output is likely VCF or text
-            if is_vcf:
-                merge_cmd = ["bcftools", "concat", "--verbose", "0", out_format, "--threads", str(processes), "--write-index", "-o", output_file]
-            else:
-                merge_cmd = ["cat"]
 
         # Merge the region outputs
         merge_cmd_str = shlex.join(merge_cmd)
@@ -512,10 +653,13 @@ class SNPSnip:
                         sample = parts[2]
                         nrefhom, nalthom, nhet, nts, ntv, nindel, mean_depth, nsingle, nhapref, nhapalt, nmissing = map(float, parts[3:14])
                         ncall = nrefhom + nalthom + nhet + nindel + nsingle + nhapref + nhapalt
-                        missing_rate = nmissing / ncall
+                        missing_rate = nmissing / ncall if ncall > 0 else 0
+                        # Calculate heterozygosity rate
+                        het_rate = nhet / ncall if ncall > 0 else 0
                         if sample in sample_stats:
                             sample_stats[sample]["missing_rate"] = missing_rate
                             sample_stats[sample]["mean_depth"] = mean_depth
+                            sample_stats[sample]["het_rate"] = het_rate
         except Exception as e:
             logger.error(f"Error processing missing data: {e}")
             raise e
@@ -610,6 +754,10 @@ class SNPSnip:
         self.state["variant_stats"] = {}
 
         for group_name, samples in sample_groups.items():
+            if len(samples) < 1:
+                logger.info(f"Skipping empty group: {group_name}")
+                continue
+
             logger.info(f"Processing group: {group_name} with {len(samples)} samples")
 
             # Create a temporary file with sample names
@@ -673,6 +821,16 @@ class SNPSnip:
                 merge_cmd=["cat"],
                 check=False
             )
+            
+            # Excess Heterozygosity
+            exhet_file = str(self.temp_dir / f"{group_name}_exhet.txt")
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=exhet_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/ExcHet\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
 
             # Parse statistics files
             try:
@@ -715,6 +873,19 @@ class SNPSnip:
                         except ValueError:
                             pass
                 stats["missing"] = self._compute_histogram(missing_rates)
+                
+                # Excess Heterozygosity - transform to -log10 scale
+                exhet_values = []
+                with open(exhet_file, 'r') as f:
+                    for line in f:
+                        try:
+                            value = float(line.strip())
+                            if value > 0:  # Avoid log of zero or negative values
+                                # Convert to -log10 scale
+                                exhet_values.append(-np.log10(value))
+                        except ValueError:
+                            pass
+                stats["exhet"] = self._compute_histogram(exhet_values)
 
                 self.state["variant_stats"][group_name] = stats
 
@@ -725,12 +896,27 @@ class SNPSnip:
         self.state["stage"] = "ready_for_variant_filtering"
         self._save_state()
 
-    def _compute_histogram(self, values, bins=50):
-        """Compute histogram for a list of values."""
+    def _compute_histogram(self, values, bins=50, use_percentiles=True):
+        """Compute histogram for a list of values.
+        
+        Args:
+            values: List of values to histogram
+            bins: Number of bins to use
+            use_percentiles: If True, limit range to 0.1-99.9 percentiles to avoid outliers
+        """
         if not values:
             return {"bins": [], "counts": []}
-
-        hist, bin_edges = np.histogram(values, bins=bins)
+            
+        if use_percentiles and len(values) > 10:
+            # Use percentiles to avoid extreme outliers expanding the range
+            low = np.percentile(values, 0.1)
+            high = np.percentile(values, 99.9)
+            # Filter values to be within this range for the histogram
+            filtered_values = [v for v in values if low <= v <= high]
+            hist, bin_edges = np.histogram(filtered_values, bins=bins, range=(low, high))
+        else:
+            hist, bin_edges = np.histogram(values, bins=bins)
+            
         return {
             "bins": bin_edges[:-1].tolist(),
             "counts": hist.tolist()
@@ -746,6 +932,9 @@ class SNPSnip:
         output_files = []
 
         for group_name, samples in sample_groups.items():
+            if len(samples) < 1:
+                logger.info(f"Skipping empty group: {group_name}")
+                continue
             logger.info(f"Processing group: {group_name}")
 
             # Create a temporary file with sample names
@@ -789,6 +978,18 @@ class SNPSnip:
                     filter_expressions.append(f"F_MISSING>={min_missing}")
                 if max_missing is not None:
                     filter_expressions.append(f"F_MISSING<={max_missing}")
+                    
+            if "exhet" in group_filters:
+                min_exhet = group_filters["exhet"].get("min")
+                max_exhet = group_filters["exhet"].get("max")
+                if min_exhet is not None:
+                    # Convert from -log10 scale back to p-value
+                    p_value = 10 ** (-min_exhet)
+                    filter_expressions.append(f"INFO/ExcHet<={p_value}")
+                if max_exhet is not None:
+                    # Convert from -log10 scale back to p-value
+                    p_value = 10 ** (-max_exhet)
+                    filter_expressions.append(f"INFO/ExcHet>={p_value}")
 
             # Add initial filters
             if self.maf:
@@ -805,20 +1006,23 @@ class SNPSnip:
             output_file = os.path.join(self.output_dir, f"{group_name}_filtered.vcf.gz")
 
             # Apply filters and extract samples
+            filter_samples = ["-S", sample_file, ]
             pipeline_cmds = [
-                ["bcftools", "view", "-S", sample_file, "-Ou"],
                 ["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING,DP:1=int(sum(FORMAT/DP))"],
             ]
 
             if filter_str:
+                # NB: this has to happen after the initial filtering by
+                # samples in a separate bcftools view cmd, as the filter
+                # thresholds have to be updated by fill_tags first.
                 view_cmd = ["bcftools", "view", "-Ou", "-i", filter_str]
                 pipeline_cmds.append(view_cmd)
-
-            logger.info(f"Running filter command: {shlex.join(view_cmd)}")
+                logger.info(f"Running filter command: {shlex.join(view_cmd)}")
 
             # Use parallel processing for final filtering
             self.run_bcftools_pipeline(
                 input_file=self.vcf_file,
+                filters=filter_samples,
                 output_file=output_file,
                 pipeline_cmds=pipeline_cmds,
                 check=True,
@@ -843,6 +1047,10 @@ def main():
     # Web server options
     parser.add_argument("--host", default=DEFAULT_HOST, help="Host to bind the web server to")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port for the web server")
+
+    # Offline mode options
+    parser.add_argument("--offline", action="store_true", help="Run in offline mode (generate static HTML)")
+    parser.add_argument("--next", help="JSON file with selections from previous step (for offline mode)")
 
     # Initial filtering options
     parser.add_argument("--maf", type=float, help="Minimum minor allele frequency")

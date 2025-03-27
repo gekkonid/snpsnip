@@ -6,6 +6,7 @@
     <title>SNPSnip - Interactive VCF Filtering</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
     <style>
         body {
             padding-top: 20px;
@@ -105,36 +106,51 @@
             <p>Filter samples based on quality metrics and PCA clustering.</p>
             
             <div class="row mb-4">
-                <div class="col-md-6">
+                <div class="col-md-4">
                     <div class="card">
                         <div class="card-header">Sample Missingness</div>
                         <div class="card-body">
                             <div id="missingness-histogram" class="histogram"></div>
-                            <div class="d-flex justify-content-between">
-                                <div>
-                                    <label for="missingness-threshold" class="form-label">Threshold:</label>
-                                    <input type="range" class="form-range" id="missingness-threshold" min="0" max="1" step="0.01" value="0.1">
-                                </div>
-                                <div>
-                                    <span id="missingness-value">0.1</span>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Max Missingness:</span>
+                                    <input type="number" class="form-control" id="missingness-threshold" min="0" max="1" step="0.01" value="0.1">
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
                 
-                <div class="col-md-6">
+                <div class="col-md-4">
                     <div class="card">
                         <div class="card-header">Sample Mean Depth</div>
                         <div class="card-body">
                             <div id="depth-histogram" class="histogram"></div>
-                            <div class="d-flex justify-content-between">
-                                <div>
-                                    <label for="depth-threshold" class="form-label">Threshold:</label>
-                                    <input type="range" class="form-range" id="depth-threshold" min="0" max="100" step="1" value="10">
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Min Depth:</span>
+                                    <input type="number" class="form-control" id="depth-threshold" min="0" step="1" value="10">
                                 </div>
-                                <div>
-                                    <span id="depth-value">10</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-md-4">
+                    <div class="card">
+                        <div class="card-header">Sample Heterozygosity</div>
+                        <div class="card-body">
+                            <div id="het-histogram" class="histogram"></div>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Min Het:</span>
+                                    <input type="number" class="form-control" id="het-min-threshold" min="0" max="1" step="0.01" value="0">
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Max Het:</span>
+                                    <input type="number" class="form-control" id="het-max-threshold" min="0" max="1" step="0.01" value="1">
                                 </div>
                             </div>
                         </div>
@@ -294,6 +310,13 @@
     </div>
     
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Embedded data for offline mode -->
+    {% if offline_mode and embedded_data %}
+    <script id="embedded-data" type="application/json">
+        {{ embedded_data|safe }}
+    </script>
+    {% endif %}
     <script>
         // Global state
         const state = {
@@ -305,13 +328,20 @@
             selectedSamples: new Set(),
             thresholds: {
                 missingness: 0.1,
-                depth: 10
+                depth: 10,
+                hetMin: 0,
+                hetMax: 1
             },
             variantThresholds: {},
             filteredSamples: new Set(),
             // Map of sample ID to group name
-            sampleToGroup: {}
+            sampleToGroup: {},
+            // Offline mode flag
+            offlineMode: false
         };
+        
+        // Embedded data for offline mode
+        let embeddedData = null;
         
         // Bootstrap modals
         let groupModal;
@@ -326,8 +356,10 @@
             mergeGroupsModal = new bootstrap.Modal(document.getElementById('mergeGroupsModal'));
             
             // Set up event listeners
-            document.getElementById('missingness-threshold').addEventListener('input', updateMissingnessThreshold);
-            document.getElementById('depth-threshold').addEventListener('input', updateDepthThreshold);
+            document.getElementById('missingness-threshold').addEventListener('change', updateMissingnessThreshold);
+            document.getElementById('depth-threshold').addEventListener('change', updateDepthThreshold);
+            document.getElementById('het-min-threshold').addEventListener('change', updateHetMinThreshold);
+            document.getElementById('het-max-threshold').addEventListener('change', updateHetMaxThreshold);
             document.getElementById('create-group').addEventListener('click', showGroupModal);
             document.getElementById('clear-selection').addEventListener('click', clearSelection);
             document.getElementById('invert-selection').addEventListener('click', invertSelection);
@@ -340,11 +372,76 @@
             document.getElementById('merge-groups').addEventListener('click', showMergeGroupsModal);
             document.getElementById('perform-merge').addEventListener('click', mergeGroups);
             
-            // Load application state
-            await loadState();
+            // Check for embedded data (offline mode)
+            const embeddedDataElement = document.getElementById('embedded-data');
+            if (embeddedDataElement) {
+                state.offlineMode = true;
+                embeddedData = JSON.parse(embeddedDataElement.textContent);
+                await loadOfflineState();
+            } else {
+                // Load application state from the server (online mode)
+                await loadState();
+            }
         });
         
-        // Load application state from the server
+        // Load application state from embedded data (offline mode)
+        async function loadOfflineState() {
+            try {
+                showLoading(true);
+                
+                updateStageIndicator(embeddedData.stage);
+                
+                // Store predefined groups if available
+                if (embeddedData.predefined_groups) {
+                    state.predefinedGroups = embeddedData.predefined_groups;
+                    // Show the "Use Predefined Groups" button if we have predefined groups
+                    if (Object.keys(state.predefinedGroups).length > 0) {
+                        document.getElementById('use-predefined-groups').style.display = 'inline-block';
+                    }
+                }
+                
+                if (embeddedData.stage === 'ready_for_sample_filtering') {
+                    // Load sample stats and PCA data from embedded data
+                    state.sampleStats = embeddedData.sample_stats;
+                    state.pca = embeddedData.pca;
+                    
+                    // Render visualizations
+                    renderMissingnessHistogram();
+                    renderDepthHistogram();
+                    renderHetHistogram();
+                    renderPcaPlot();
+                    updateFilteredSamples();
+                    
+                    showSampleFiltering();
+                } else if (embeddedData.stage === 'ready_for_variant_filtering') {
+                    // Load sample groups and variant stats from embedded data
+                    state.sampleGroups = embeddedData.sample_groups;
+                    state.variantStats = embeddedData.variant_stats;
+                    
+                    // Initialize variant thresholds
+                    for (const groupName in state.sampleGroups) {
+                        state.variantThresholds[groupName] = {
+                            qual: { min: null, max: null },
+                            depth: { min: null, max: null },
+                            af: { min: null, max: null },
+                            missing: { min: null, max: null }
+                        };
+                    }
+                    
+                    renderVariantFiltering();
+                    showVariantFiltering();
+                } else if (embeddedData.completed) {
+                    showCompletion(embeddedData.output_files || []);
+                }
+            } catch (error) {
+                console.error('Error loading offline state:', error);
+                alert('Error loading application state. Please check the console for details.');
+            } finally {
+                showLoading(false);
+            }
+        }
+        
+        // Load application state from the server (online mode)
         async function loadState() {
             try {
                 showLoading(true);
@@ -430,6 +527,7 @@
             // Render visualizations
             renderMissingnessHistogram();
             renderDepthHistogram();
+            renderHetHistogram();
             renderPcaPlot();
             
             // Initialize filtered samples
@@ -459,7 +557,8 @@
                     qual: { min: null, max: null },
                     depth: { min: null, max: null },
                     af: { min: null, max: null },
-                    missing: { min: null, max: null }
+                    missing: { min: null, max: null },
+                    exhet: { min: null, max: null }
                 };
             }
             
@@ -538,6 +637,7 @@
                 .attr('transform', `translate(${margin.left},0)`)
                 .call(d3.axisLeft(y));
             
+            // Create bars
             svg.append('g')
                 .selectAll('rect')
                 .data(bins)
@@ -550,6 +650,7 @@
             // Add threshold line
             svg.append('line')
                 .attr('class', 'threshold-line')
+                .attr('id', 'missingness-threshold-line')
                 .attr('x1', x(state.thresholds.missingness))
                 .attr('x2', x(state.thresholds.missingness))
                 .attr('y1', margin.top)
@@ -594,6 +695,7 @@
                 .attr('transform', `translate(${margin.left},0)`)
                 .call(d3.axisLeft(y));
             
+            // Create bars
             svg.append('g')
                 .selectAll('rect')
                 .data(bins)
@@ -606,6 +708,7 @@
             // Add threshold line
             svg.append('line')
                 .attr('class', 'threshold-line')
+                .attr('id', 'depth-threshold-line')
                 .attr('x1', x(state.thresholds.depth))
                 .attr('x2', x(state.thresholds.depth))
                 .attr('y1', margin.top)
@@ -613,6 +716,73 @@
             
             // Store the x scale for later use
             state.depthScale = x;
+        }
+        
+        // Render heterozygosity histogram
+        function renderHetHistogram() {
+            const data = state.sampleStats.map(s => s.het_rate || 0);
+            
+            const width = 500;
+            const height = 200;
+            const margin = { top: 20, right: 30, bottom: 30, left: 40 };
+            
+            const svg = d3.select('#het-histogram')
+                .html('')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            const x = d3.scaleLinear()
+                .domain([0, d3.max(data) || 1])
+                .range([margin.left, width - margin.right]);
+            
+            const bins = d3.histogram()
+                .domain(x.domain())
+                .thresholds(x.ticks(20))
+                (data);
+            
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(bins, d => d.length)])
+                .range([height - margin.bottom, margin.top]);
+            
+            svg.append('g')
+                .attr('transform', `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x));
+            
+            svg.append('g')
+                .attr('transform', `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y));
+            
+            // Create bars
+            svg.append('g')
+                .selectAll('rect')
+                .data(bins)
+                .join('rect')
+                .attr('x', d => x(d.x0) + 1)
+                .attr('width', d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+                .attr('y', d => y(d.length))
+                .attr('height', d => y(0) - y(d.length));
+            
+            // Add min threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', 'het-min-threshold-line')
+                .attr('x1', x(state.thresholds.hetMin))
+                .attr('x2', x(state.thresholds.hetMin))
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+                
+            // Add max threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', 'het-max-threshold-line')
+                .attr('x1', x(state.thresholds.hetMax))
+                .attr('x2', x(state.thresholds.hetMax))
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+            
+            // Store the x scale for later use
+            state.hetScale = x;
         }
         
         // Render PCA plot
@@ -1211,11 +1381,12 @@
         // Update missingness threshold
         function updateMissingnessThreshold(event) {
             const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
             state.thresholds.missingness = value;
-            document.getElementById('missingness-value').textContent = value.toFixed(2);
             
             // Update threshold line
-            d3.select('#missingness-histogram .threshold-line')
+            d3.select('#missingness-threshold-line')
                 .attr('x1', state.missingnessScale(value))
                 .attr('x2', state.missingnessScale(value));
             
@@ -1226,13 +1397,46 @@
         // Update depth threshold
         function updateDepthThreshold(event) {
             const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
             state.thresholds.depth = value;
-            document.getElementById('depth-value').textContent = value.toFixed(0);
             
             // Update threshold line
-            d3.select('#depth-histogram .threshold-line')
+            d3.select('#depth-threshold-line')
                 .attr('x1', state.depthScale(value))
                 .attr('x2', state.depthScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update heterozygosity min threshold
+        function updateHetMinThreshold(event) {
+            const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
+            state.thresholds.hetMin = value;
+            
+            // Update threshold line
+            d3.select('#het-min-threshold-line')
+                .attr('x1', state.hetScale(value))
+                .attr('x2', state.hetScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update heterozygosity max threshold
+        function updateHetMaxThreshold(event) {
+            const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
+            state.thresholds.hetMax = value;
+            
+            // Update threshold line
+            d3.select('#het-max-threshold-line')
+                .attr('x1', state.hetScale(value))
+                .attr('x2', state.hetScale(value));
             
             // Update filtered samples
             updateFilteredSamples();
@@ -1245,8 +1449,12 @@
             state.sampleStats.forEach(sample => {
                 const missingRate = sample.missing_rate || 0;
                 const meanDepth = sample.mean_depth || 0;
+                const hetRate = sample.het_rate || 0;
                 
-                if (missingRate > state.thresholds.missingness || meanDepth < state.thresholds.depth) {
+                if (missingRate > state.thresholds.missingness || 
+                    meanDepth < state.thresholds.depth ||
+                    hetRate < state.thresholds.hetMin ||
+                    hetRate > state.thresholds.hetMax) {
                     state.filteredSamples.add(sample.id);
                 }
             });
@@ -1262,11 +1470,11 @@
                 alert('Please create at least one sample group before continuing.');
                 return;
             }
-            
+
             try {
                 showLoading(true);
                 
-                // Apply missingness and depth thresholds to filter samples
+                // Apply missingness, depth, and heterozygosity thresholds to filter samples
                 for (const groupName in state.sampleGroups) {
                     state.sampleGroups[groupName] = state.sampleGroups[groupName].filter(sample => {
                         const sampleData = state.sampleStats.find(s => s.id === sample);
@@ -1274,29 +1482,46 @@
                         
                         const missingRate = sampleData.missing_rate || 0;
                         const meanDepth = sampleData.mean_depth || 0;
+                        const hetRate = sampleData.het_rate || 0;
                         
-                        return missingRate <= state.thresholds.missingness && meanDepth >= state.thresholds.depth;
+                        return missingRate <= state.thresholds.missingness && 
+                               meanDepth >= state.thresholds.depth &&
+                               hetRate >= state.thresholds.hetMin &&
+                               hetRate <= state.thresholds.hetMax;
                     });
                 }
                 
-                // Submit to server
-                const response = await fetch('/api/submit_sample_filters', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
+                if (state.offlineMode) {
+                    // In offline mode, download a JSON file with the groups
+                    const jsonData = {
                         groups: state.sampleGroups
-                    })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    // Reload state and show variant filtering
-                    await loadState();
+                    };
+                    
+                    const blob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
+                    saveAs(blob, 'snpsnip_sample_groups.json');
+                    
+                    // Show instructions
+                    alert('Sample groups have been saved to a JSON file. Please provide this file to the next invocation of SNPSnip using the --next parameter.');
                 } else {
-                    alert('Error submitting sample filters');
+                    // Submit to server in online mode
+                    const response = await fetch('/api/submit_sample_filters', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            groups: state.sampleGroups
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        // Reload state and show variant filtering
+                        await loadState();
+                    } else {
+                        alert('Error submitting sample filters');
+                    }
                 }
             } catch (error) {
                 console.error('Error submitting sample filters:', error);
@@ -1380,6 +1605,20 @@
                         }
                     );
                     metricsRow.appendChild(missingDiv);
+                }
+                
+                // Excess Heterozygosity (-log10 p-value)
+                if (groupStats.exhet) {
+                    const exhetDiv = createMetricCard(
+                        'Excess Heterozygosity (-log10 p)',
+                        groupStats.exhet,
+                        `${groupName}-exhet`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].exhet.min = min;
+                            state.variantThresholds[groupName].exhet.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(exhetDiv);
                 }
                 
                 groupDiv.appendChild(metricsRow);
@@ -1569,24 +1808,37 @@
             try {
                 showLoading(true);
                 
-                // Submit to server
-                const response = await fetch('/api/submit_variant_filters', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
+                if (state.offlineMode) {
+                    // In offline mode, download a JSON file with the thresholds
+                    const jsonData = {
                         thresholds: state.variantThresholds
-                    })
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    // Show completion
-                    showCompletion(result.output_files || []);
+                    };
+                    
+                    const blob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
+                    saveAs(blob, 'snpsnip_variant_thresholds.json');
+                    
+                    // Show instructions
+                    alert('Variant thresholds have been saved to a JSON file. Please provide this file to the next invocation of SNPSnip using the --next parameter.');
                 } else {
-                    alert('Error submitting variant filters');
+                    // Submit to server in online mode
+                    const response = await fetch('/api/submit_variant_filters', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            thresholds: state.variantThresholds
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        // Show completion
+                        showCompletion(result.output_files || []);
+                    } else {
+                        alert('Error submitting variant filters');
+                    }
                 }
             } catch (error) {
                 console.error('Error submitting variant filters:', error);
