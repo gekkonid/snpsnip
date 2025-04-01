@@ -1,0 +1,1973 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNPSnip - Interactive VCF Filtering</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+    <style>
+        body {
+            padding-top: 20px;
+            padding-bottom: 40px;
+        }
+        .histogram {
+            margin-bottom: 20px;
+        }
+        .histogram rect {
+            fill: steelblue;
+        }
+        .histogram rect:hover {
+            fill: orange;
+        }
+        .pca-plot {
+            border: 2px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            background-color: #f9f9f9;
+        }
+        .pca-plot circle {
+            stroke: steelblue;
+            stroke-width: 2px;
+            opacity: 0.7;
+        }
+        .pca-plot circle.selected {
+            stroke: orange;
+            stroke-width: 2px;
+            opacity: 0.7;
+        }
+        .pca-plot circle.filtered {
+            opacity: 0.2;
+        }
+        .pca-plot circle.highlighted {
+            stroke: red;
+            stroke-width: 2px;
+        }
+        .threshold-line {
+            stroke: red;
+            stroke-width: 2px;
+            stroke-dasharray: 5,5;
+        }
+        .group-container {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .group-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3498db;
+            border-radius: 50%;
+            animation: spin 2s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4">SNPSnip - Interactive VCF Filtering</h1>
+        
+        <div id="loading" class="loading" style="display: none;">
+            <div class="loading-spinner"></div>
+            <div class="ms-3">Processing...</div>
+        </div>
+        
+        <div id="stage-indicator" class="alert alert-info mb-4">
+            Loading application state...
+        </div>
+        
+        <!-- Sample Filtering Stage -->
+        <div id="sample-filtering" style="display: none;">
+            <h2>Step 1: Sample Filtering</h2>
+            <p>Filter samples based on quality metrics and PCA clustering.</p>
+            
+            <div class="row mb-4">
+                <div class="col-md-4">
+                    <div class="card">
+                        <div class="card-header">Sample Missingness</div>
+                        <div class="card-body">
+                            <div id="missingness-histogram" class="histogram"></div>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Max Missingness:</span>
+                                    <input type="number" class="form-control" id="missingness-threshold" min="0" max="1" step="0.01" value="0.1">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-md-4">
+                    <div class="card">
+                        <div class="card-header">Sample Mean Depth</div>
+                        <div class="card-body">
+                            <div id="depth-histogram" class="histogram"></div>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Min Depth:</span>
+                                    <input type="number" class="form-control" id="depth-threshold" min="0" step="1" value="10">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-md-4">
+                    <div class="card">
+                        <div class="card-header">Sample Heterozygosity</div>
+                        <div class="card-body">
+                            <div id="het-histogram" class="histogram"></div>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Min Het:</span>
+                                    <input type="number" class="form-control" id="het-min-threshold" min="0" max="1" step="0.01" value="0">
+                                </div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center mt-2">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text">Max Het:</span>
+                                    <input type="number" class="form-control" id="het-max-threshold" min="0" max="1" step="0.01" value="1">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card mb-4">
+                <div class="card-header">Sample PCA</div>
+                <div class="card-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-text">X-axis:</span>
+                                <select id="pca-x-axis" class="form-select">
+                                    <!-- Options will be populated by JavaScript -->
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-text">Y-axis:</span>
+                                <select id="pca-y-axis" class="form-select">
+                                    <!-- Options will be populated by JavaScript -->
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="pca-plot" class="pca-plot"></div>
+                    <div id="pca-variance-info" class="text-muted mt-2 mb-3">
+                        <!-- Variance explained info will be shown here -->
+                    </div>
+                    <div class="mt-3">
+                        <button id="create-group" class="btn btn-primary">Create Group from Selection</button>
+                        <button id="clear-selection" class="btn btn-secondary">Clear Selection</button>
+                        <button id="invert-selection" class="btn btn-info">Invert Selection</button>
+                        <button id="select-unassigned" class="btn btn-warning">Select Unassigned</button>
+                        <button id="use-predefined-groups" class="btn btn-success" style="display: none;">Use Predefined Groups</button>
+                        <button id="merge-groups" class="btn btn-primary">Merge Groups</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="sample-groups" class="mb-4">
+                <h3>Sample Groups</h3>
+                <div id="group-list"></div>
+                <div id="group-table-container" style="display: none;">
+                    <table id="group-table" class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Sample</th>
+                                <th>Group</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="group-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <button id="submit-sample-filters" class="btn btn-success btn-lg">Continue to Variant Filtering</button>
+        </div>
+        
+        <!-- Variant Filtering Stage -->
+        <div id="variant-filtering" style="display: none;">
+            <h2>Step 2: Variant Filtering</h2>
+            <p>Set filtering thresholds for each sample group.</p>
+            
+            <div id="variant-groups"></div>
+            
+            <button id="submit-variant-filters" class="btn btn-success btn-lg mt-4">Apply Filters to Full VCF</button>
+        </div>
+        
+        <!-- Completion Stage -->
+        <div id="completion" style="display: none;">
+            <h2>Filtering Complete</h2>
+            <div class="alert alert-success">
+                <p>All filtering steps have been completed successfully.</p>
+            </div>
+            
+            <h3>Output Files:</h3>
+            <ul id="output-files" class="list-group mb-4"></ul>
+            
+            <p>You can close this window and return to the command line.</p>
+        </div>
+    </div>
+    
+    <!-- Group Name Modal -->
+    <div class="modal fade" id="groupNameModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Create Sample Group</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="group-name" class="form-label">Group Name:</label>
+                        <input type="text" class="form-control" id="group-name" placeholder="Enter a name for this group">
+                    </div>
+                    <p><span id="selected-count">0</span> samples selected</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="save-group">Save Group</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Single Sample Group Assignment Modal -->
+    <div class="modal fade" id="singleSampleModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Assign Sample to Group</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Assign sample <strong id="single-sample-name"></strong> to group:</p>
+                    <div class="mb-3">
+                        <select class="form-select" id="single-sample-group">
+                            <option value="">-- Select Group --</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="new-group-name" class="form-label">Or create new group:</label>
+                        <input type="text" class="form-control" id="new-group-name" placeholder="Enter a new group name">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="assign-sample">Assign</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Merge Groups Modal -->
+    <div class="modal fade" id="mergeGroupsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Merge Groups</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="source-group" class="form-label">Source Group:</label>
+                        <select class="form-select" id="source-group">
+                            <option value="">-- Select Group --</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="target-group" class="form-label">Target Group:</label>
+                        <select class="form-select" id="target-group">
+                            <option value="">-- Select Group --</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="merged-group-name" class="form-label">New Group Name (optional):</label>
+                        <input type="text" class="form-control" id="merged-group-name" placeholder="Leave empty to use target group name">
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="delete-source-group" checked>
+                        <label class="form-check-label" for="delete-source-group">
+                            Delete source group after merging
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="perform-merge">Merge Groups</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Embedded data for offline mode -->
+    {% if offline_mode and embedded_data %}
+    <script id="embedded-data" type="application/json">
+        {{ embedded_data|safe }}
+    </script>
+    {% endif %}
+    <script>
+        // Global state
+        const state = {
+            sampleStats: [],
+            pca: {
+                samples: [],
+                variance_explained: [],
+                n_components: 0
+            },
+            variantStats: {},
+            sampleGroups: {},
+            predefinedGroups: {},
+            selectedSamples: new Set(),
+            thresholds: {
+                missingness: 0.1,
+                depth: 10,
+                hetMin: 0,
+                hetMax: 1
+            },
+            variantThresholds: {},
+            filteredSamples: new Set(),
+            // Map of sample ID to group name
+            sampleToGroup: {},
+            // Offline mode flag
+            offlineMode: false,
+            // PCA axis selection
+            pcaXAxis: "pc1",
+            pcaYAxis: "pc2"
+        };
+        
+        // Embedded data for offline mode
+        let embeddedData = null;
+        
+        // Bootstrap modals
+        let groupModal;
+        let singleSampleModal;
+        let mergeGroupsModal;
+        
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Initialize Bootstrap modals
+            groupModal = new bootstrap.Modal(document.getElementById('groupNameModal'));
+            singleSampleModal = new bootstrap.Modal(document.getElementById('singleSampleModal'));
+            mergeGroupsModal = new bootstrap.Modal(document.getElementById('mergeGroupsModal'));
+            
+            // Set up event listeners
+            document.getElementById('missingness-threshold').addEventListener('change', updateMissingnessThreshold);
+            document.getElementById('depth-threshold').addEventListener('change', updateDepthThreshold);
+            document.getElementById('het-min-threshold').addEventListener('change', updateHetMinThreshold);
+            document.getElementById('het-max-threshold').addEventListener('change', updateHetMaxThreshold);
+            document.getElementById('create-group').addEventListener('click', showGroupModal);
+            document.getElementById('clear-selection').addEventListener('click', clearSelection);
+            document.getElementById('invert-selection').addEventListener('click', invertSelection);
+            document.getElementById('select-unassigned').addEventListener('click', selectUnassigned);
+            document.getElementById('save-group').addEventListener('click', saveGroup);
+            document.getElementById('submit-sample-filters').addEventListener('click', submitSampleFilters);
+            document.getElementById('submit-variant-filters').addEventListener('click', submitVariantFilters);
+            document.getElementById('use-predefined-groups').addEventListener('click', usePredefinedGroups);
+            document.getElementById('assign-sample').addEventListener('click', assignSingleSample);
+            document.getElementById('merge-groups').addEventListener('click', showMergeGroupsModal);
+            document.getElementById('perform-merge').addEventListener('click', mergeGroups);
+            document.getElementById('pca-x-axis').addEventListener('change', updatePcaAxes);
+            document.getElementById('pca-y-axis').addEventListener('change', updatePcaAxes);
+            
+            // Check for embedded data (offline mode)
+            const embeddedDataElement = document.getElementById('embedded-data');
+            if (embeddedDataElement) {
+                state.offlineMode = true;
+                embeddedData = JSON.parse(embeddedDataElement.textContent);
+                await loadOfflineState();
+            } else {
+                // Load application state from the server (online mode)
+                await loadState();
+            }
+        });
+        
+        // Load application state from embedded data (offline mode)
+        async function loadOfflineState() {
+            try {
+                showLoading(true);
+                
+                updateStageIndicator(embeddedData.stage);
+                
+                // Store predefined groups if available
+                if (embeddedData.predefined_groups) {
+                    state.predefinedGroups = embeddedData.predefined_groups;
+                    // Show the "Use Predefined Groups" button if we have predefined groups
+                    if (Object.keys(state.predefinedGroups).length > 0) {
+                        document.getElementById('use-predefined-groups').style.display = 'inline-block';
+                    }
+                }
+                
+                if (embeddedData.stage === 'ready_for_sample_filtering') {
+                    // Load sample stats and PCA data from embedded data
+                    state.sampleStats = embeddedData.sample_stats;
+                    state.pca = embeddedData.pca;
+                    
+                    // Initialize PCA axis selectors
+                    initializePcaAxisSelectors();
+                    
+                    // Render visualizations
+                    renderMissingnessHistogram();
+                    renderDepthHistogram();
+                    renderHetHistogram();
+                    renderPcaPlot();
+                    updateFilteredSamples();
+                    
+                    showSampleFiltering();
+                } else if (embeddedData.stage === 'ready_for_variant_filtering') {
+                    // Load sample groups and variant stats from embedded data
+                    state.sampleGroups = embeddedData.sample_groups;
+                    state.variantStats = embeddedData.variant_stats;
+                    
+                    // Initialize variant thresholds
+                    for (const groupName in state.sampleGroups) {
+                        state.variantThresholds[groupName] = {
+                            qual: { min: null, max: null },
+                            depth: { min: null, max: null },
+                            af: { min: null, max: null },
+                            missing: { min: null, max: null }
+                        };
+                    }
+                    
+                    renderVariantFiltering();
+                    showVariantFiltering();
+                } else if (embeddedData.completed) {
+                    showCompletion(embeddedData.output_files || []);
+                }
+            } catch (error) {
+                console.error('Error loading offline state:', error);
+                alert('Error loading application state. Please check the console for details.');
+            } finally {
+                showLoading(false);
+            }
+        }
+        
+        // Load application state from the server (online mode)
+        async function loadState() {
+            try {
+                showLoading(true);
+                const response = await fetch('/api/state');
+                const appState = await response.json();
+                
+                updateStageIndicator(appState.stage);
+                
+                // Store predefined groups if available
+                if (appState.predefined_groups) {
+                    state.predefinedGroups = appState.predefined_groups;
+                    // Show the "Use Predefined Groups" button if we have predefined groups
+                    if (Object.keys(state.predefinedGroups).length > 0) {
+                        document.getElementById('use-predefined-groups').style.display = 'inline-block';
+                    }
+                }
+                
+                if (appState.stage === 'ready_for_sample_filtering') {
+                    await loadSampleFilteringData();
+                    showSampleFiltering();
+                } else if (appState.stage === 'ready_for_variant_filtering') {
+                    await loadVariantFilteringData();
+                    showVariantFiltering();
+                } else if (appState.completed) {
+                    showCompletion(appState.output_files || []);
+                }
+            } catch (error) {
+                console.error('Error loading state:', error);
+                alert('Error loading application state. Please check the console for details.');
+            } finally {
+                showLoading(false);
+            }
+        }
+        
+        // Update the sampleToGroup mapping based on current group assignments
+        function updateSampleToGroupMapping() {
+            // Clear the current mapping
+            state.sampleToGroup = {};
+            
+            // Create mapping from sample to group
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                for (const sample of samples) {
+                    state.sampleToGroup[sample] = groupName;
+                }
+            }
+        }
+        
+        // Update the stage indicator
+        function updateStageIndicator(stage) {
+            const indicator = document.getElementById('stage-indicator');
+            
+            switch (stage) {
+                case 'init':
+                    indicator.textContent = 'Initializing...';
+                    break;
+                case 'ready_for_sample_filtering':
+                    indicator.textContent = 'Ready for sample filtering';
+                    break;
+                case 'sample_filtered':
+                    indicator.textContent = 'Processing variant statistics...';
+                    break;
+                case 'ready_for_variant_filtering':
+                    indicator.textContent = 'Ready for variant filtering';
+                    break;
+                case 'ready_for_final':
+                    indicator.textContent = 'Applying final filters...';
+                    break;
+                default:
+                    indicator.textContent = `Current stage: ${stage}`;
+            }
+        }
+        
+        // Load data for sample filtering
+        async function loadSampleFilteringData() {
+            // Load sample stats
+            const statsResponse = await fetch('/api/sample_stats');
+            state.sampleStats = await statsResponse.json();
+            
+            // Load PCA data
+            const pcaResponse = await fetch('/api/pca');
+            state.pca = await pcaResponse.json();
+            
+            // Initialize PCA axis selectors
+            initializePcaAxisSelectors();
+            
+            // Render visualizations
+            renderMissingnessHistogram();
+            renderDepthHistogram();
+            renderHetHistogram();
+            renderPcaPlot();
+            
+            // Initialize filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Initialize PCA axis selectors
+        function initializePcaAxisSelectors() {
+            const xAxisSelect = document.getElementById('pca-x-axis');
+            const yAxisSelect = document.getElementById('pca-y-axis');
+            
+            // Clear existing options
+            xAxisSelect.innerHTML = '';
+            yAxisSelect.innerHTML = '';
+            
+            // Get number of components
+            const nComponents = state.pca.n_components || 
+                               (state.pca.samples && state.pca.samples.length > 0 ? 
+                                Object.keys(state.pca.samples[0]).filter(k => k.startsWith('pc')).length : 
+                                2);
+            
+            // Create options for each component
+            for (let i = 1; i <= nComponents; i++) {
+                const xOption = document.createElement('option');
+                xOption.value = `pc${i}`;
+                xOption.textContent = `PC${i} (${state.pca.variance_explained ? 
+                    state.pca.variance_explained[i-1].toFixed(1) + '%' : 
+                    'N/A'})`;
+                xAxisSelect.appendChild(xOption);
+                
+                const yOption = document.createElement('option');
+                yOption.value = `pc${i}`;
+                yOption.textContent = `PC${i} (${state.pca.variance_explained ? 
+                    state.pca.variance_explained[i-1].toFixed(1) + '%' : 
+                    'N/A'})`;
+                yAxisSelect.appendChild(yOption);
+            }
+            
+            // Set default selections
+            xAxisSelect.value = 'pc1';
+            yAxisSelect.value = 'pc2';
+            state.pcaXAxis = 'pc1';
+            state.pcaYAxis = 'pc2';
+        }
+        
+        // Update PCA axes when selection changes
+        function updatePcaAxes() {
+            state.pcaXAxis = document.getElementById('pca-x-axis').value;
+            state.pcaYAxis = document.getElementById('pca-y-axis').value;
+            renderPcaPlot();
+        }
+        
+        // Load data for variant filtering
+        async function loadVariantFilteringData() {
+            // Load sample groups
+            const stateResponse = await fetch('/api/state');
+            const appState = await stateResponse.json();
+            state.sampleGroups = appState.sample_groups || {};
+            
+            // Load variant stats for each group
+            for (const groupName in state.sampleGroups) {
+                try {
+                    const response = await fetch(`/api/variant_stats/${groupName}`);
+                    state.variantStats[groupName] = await response.json();
+                } catch (error) {
+                    console.error(`Error loading variant stats for group ${groupName}:`, error);
+                }
+            }
+            
+            // Initialize variant thresholds
+            for (const groupName in state.sampleGroups) {
+                state.variantThresholds[groupName] = {
+                    qual: { min: null, max: null },
+                    depth: { min: null, max: null },
+                    af: { min: null, max: null },
+                    missing: { min: null, max: null },
+                    exhet: { min: null, max: null }
+                };
+            }
+            
+            // Render variant filtering UI
+            renderVariantFiltering();
+        }
+        
+        // Show sample filtering UI
+        function showSampleFiltering() {
+            document.getElementById('sample-filtering').style.display = 'block';
+            document.getElementById('variant-filtering').style.display = 'none';
+            document.getElementById('completion').style.display = 'none';
+        }
+        
+        // Show variant filtering UI
+        function showVariantFiltering() {
+            document.getElementById('sample-filtering').style.display = 'none';
+            document.getElementById('variant-filtering').style.display = 'block';
+            document.getElementById('completion').style.display = 'none';
+        }
+        
+        // Show completion UI
+        function showCompletion(outputFiles) {
+            document.getElementById('sample-filtering').style.display = 'none';
+            document.getElementById('variant-filtering').style.display = 'none';
+            document.getElementById('completion').style.display = 'block';
+            
+            const filesList = document.getElementById('output-files');
+            filesList.innerHTML = '';
+            
+            outputFiles.forEach(file => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item';
+                li.textContent = file;
+                filesList.appendChild(li);
+            });
+        }
+        
+        // Show/hide loading indicator
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'flex' : 'none';
+        }
+        
+        // Render missingness histogram
+        function renderMissingnessHistogram() {
+            const data = state.sampleStats.map(s => s.missing_rate || 0);
+            
+            const width = 500;
+            const height = 200;
+            const margin = { top: 20, right: 30, bottom: 30, left: 40 };
+            
+            const svg = d3.select('#missingness-histogram')
+                .html('')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            const x = d3.scaleLinear()
+                .domain([0, d3.max(data) || 1])
+                .range([margin.left, width - margin.right]);
+            
+            const bins = d3.histogram()
+                .domain(x.domain())
+                .thresholds(x.ticks(20))
+                (data);
+            
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(bins, d => d.length)])
+                .range([height - margin.bottom, margin.top]);
+            
+            svg.append('g')
+                .attr('transform', `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x));
+            
+            svg.append('g')
+                .attr('transform', `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y));
+            
+            // Create bars
+            svg.append('g')
+                .selectAll('rect')
+                .data(bins)
+                .join('rect')
+                .attr('x', d => x(d.x0) + 1)
+                .attr('width', d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+                .attr('y', d => y(d.length))
+                .attr('height', d => y(0) - y(d.length));
+            
+            // Add threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', 'missingness-threshold-line')
+                .attr('x1', x(state.thresholds.missingness))
+                .attr('x2', x(state.thresholds.missingness))
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+            
+            // Store the x scale for later use
+            state.missingnessScale = x;
+        }
+        
+        // Render depth histogram
+        function renderDepthHistogram() {
+            const data = state.sampleStats.map(s => s.mean_depth || 0);
+            
+            const width = 500;
+            const height = 200;
+            const margin = { top: 20, right: 30, bottom: 30, left: 40 };
+            
+            const svg = d3.select('#depth-histogram')
+                .html('')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            const x = d3.scaleLinear()
+                .domain([0, d3.max(data) || 100])
+                .range([margin.left, width - margin.right]);
+            
+            const bins = d3.histogram()
+                .domain(x.domain())
+                .thresholds(x.ticks(20))
+                (data);
+            
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(bins, d => d.length)])
+                .range([height - margin.bottom, margin.top]);
+            
+            svg.append('g')
+                .attr('transform', `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x));
+            
+            svg.append('g')
+                .attr('transform', `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y));
+            
+            // Create bars
+            svg.append('g')
+                .selectAll('rect')
+                .data(bins)
+                .join('rect')
+                .attr('x', d => x(d.x0) + 1)
+                .attr('width', d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+                .attr('y', d => y(d.length))
+                .attr('height', d => y(0) - y(d.length));
+            
+            // Add threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', 'depth-threshold-line')
+                .attr('x1', x(state.thresholds.depth))
+                .attr('x2', x(state.thresholds.depth))
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+            
+            // Store the x scale for later use
+            state.depthScale = x;
+        }
+        
+        // Render heterozygosity histogram
+        function renderHetHistogram() {
+            const data = state.sampleStats.map(s => s.het_rate || 0);
+            
+            const width = 500;
+            const height = 200;
+            const margin = { top: 20, right: 30, bottom: 30, left: 40 };
+            
+            const svg = d3.select('#het-histogram')
+                .html('')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            const x = d3.scaleLinear()
+                .domain([0, d3.max(data) || 1])
+                .range([margin.left, width - margin.right]);
+            
+            const bins = d3.histogram()
+                .domain(x.domain())
+                .thresholds(x.ticks(20))
+                (data);
+            
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(bins, d => d.length)])
+                .range([height - margin.bottom, margin.top]);
+            
+            svg.append('g')
+                .attr('transform', `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x));
+            
+            svg.append('g')
+                .attr('transform', `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y));
+            
+            // Create bars
+            svg.append('g')
+                .selectAll('rect')
+                .data(bins)
+                .join('rect')
+                .attr('x', d => x(d.x0) + 1)
+                .attr('width', d => Math.max(0, x(d.x1) - x(d.x0) - 1))
+                .attr('y', d => y(d.length))
+                .attr('height', d => y(0) - y(d.length));
+            
+            // Add min threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', 'het-min-threshold-line')
+                .attr('x1', x(state.thresholds.hetMin))
+                .attr('x2', x(state.thresholds.hetMin))
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+                
+            // Add max threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', 'het-max-threshold-line')
+                .attr('x1', x(state.thresholds.hetMax))
+                .attr('x2', x(state.thresholds.hetMax))
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+            
+            // Store the x scale for later use
+            state.hetScale = x;
+        }
+        
+        // Render PCA plot
+        function renderPcaPlot() {
+            // Get the data in the right format
+            let data;
+            if (state.pca.samples) {
+                // New format with samples array
+                data = state.pca.samples;
+            } else if (Array.isArray(state.pca)) {
+                // Old format with direct array
+                data = state.pca;
+            } else {
+                console.error("Invalid PCA data format");
+                return;
+            }
+            
+            // Get the selected axes
+            const xAxis = state.pcaXAxis || 'pc1';
+            const yAxis = state.pcaYAxis || 'pc2';
+            
+            // Update the sample to group mapping
+            updateSampleToGroupMapping();
+            
+            const width = 800;
+            const height = 600;
+            const margin = { top: 20, right: 150, bottom: 30, left: 40 }; // Increased right margin for legend
+            
+            const svg = d3.select('#pca-plot')
+                .html('')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            // Create scales
+            const x = d3.scaleLinear()
+                .domain(d3.extent(data, d => d[xAxis]))
+                .range([margin.left, width - margin.right]);
+            
+            const y = d3.scaleLinear()
+                .domain(d3.extent(data, d => d[yAxis]))
+                .range([height - margin.bottom, margin.top]);
+            
+            // Add axes
+            svg.append('g')
+                .attr('transform', `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x).tickFormat(d3.format('.2f')));
+            
+            svg.append('g')
+                .attr('transform', `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y).tickFormat(d3.format('.2f')));
+            
+            // Add axis labels with variance explained if available
+            const xAxisLabel = xAxis.toUpperCase();
+            const yAxisLabel = yAxis.toUpperCase();
+            
+            svg.append('text')
+                .attr('x', width / 2)
+                .attr('y', height - 5)
+                .attr('text-anchor', 'middle')
+                .text(xAxisLabel);
+            
+            svg.append('text')
+                .attr('transform', 'rotate(-90)')
+                .attr('x', -height / 2)
+                .attr('y', 15)
+                .attr('text-anchor', 'middle')
+                .text(yAxisLabel);
+            
+            // Display variance explained information
+            const varianceInfo = document.getElementById('pca-variance-info');
+            if (state.pca.variance_explained) {
+                const xAxisIndex = parseInt(xAxis.replace('pc', '')) - 1;
+                const yAxisIndex = parseInt(yAxis.replace('pc', '')) - 1;
+                
+                if (xAxisIndex >= 0 && yAxisIndex >= 0 && 
+                    xAxisIndex < state.pca.variance_explained.length && 
+                    yAxisIndex < state.pca.variance_explained.length) {
+                    
+                    const xVariance = state.pca.variance_explained[xAxisIndex].toFixed(2);
+                    const yVariance = state.pca.variance_explained[yAxisIndex].toFixed(2);
+                    
+                    varianceInfo.textContent = `Variance explained: ${xAxisLabel} = ${xVariance}%, ${yAxisLabel} = ${yVariance}%`;
+                } else {
+                    varianceInfo.textContent = '';
+                }
+            } else {
+                varianceInfo.textContent = '';
+            }
+            
+            // Get all unique groups from the current sample-to-group mapping
+            const groups = [...new Set(Object.values(state.sampleToGroup))].filter(Boolean);
+            const hasGroups = groups.length > 0;
+            
+            // Create color scale for groups
+            let colorScale;
+            if (hasGroups) {
+                colorScale = d3.scaleOrdinal()
+                    .domain(groups)
+                    .range(d3.schemeCategory10);
+            }
+            
+            // Add points
+            const points = svg.append('g')
+                .selectAll('circle')
+                .data(data)
+                .join('circle')
+                .attr('cx', d => x(d[xAxis]))
+                .attr('cy', d => y(d[yAxis]))
+                .attr('r', 5)
+                .attr('fill', d => {
+                    const group = state.sampleToGroup[d.sample];
+                    return group && hasGroups ? colorScale(group) : 'steelblue';
+                })
+                .attr('class', d => {
+                    let classes = [];
+                    if (state.selectedSamples.has(d.sample)) classes.push('selected');
+                    if (state.filteredSamples.has(d.sample)) classes.push('filtered');
+                    return classes.join(' ');
+                })
+                .on('click', function(event, d) {
+                    // If in brush mode, don't handle clicks on points
+                    if (brushMode) return;
+                    
+                    // Check if Shift key is pressed for multi-select
+                    if (event.shiftKey) {
+                        toggleSampleSelection(d.sample);
+                        d3.select(this).classed('selected', state.selectedSamples.has(d.sample));
+                    } else {
+                        // Single click without Shift opens the single sample assignment modal
+                        showSingleSampleModal(d.sample);
+                    }
+                    
+                    // Stop event propagation to prevent brush from activating
+                    event.stopPropagation();
+                })
+                .append('title')
+                .text(d => {
+                    const group = state.sampleToGroup[d.sample];
+                    return group ? `${d.sample} (${group})` : d.sample;
+                });
+            
+            // Add legend if we have groups
+            if (hasGroups && groups.length > 0) {
+                const legend = svg.append('g')
+                    .attr('transform', `translate(${width - margin.right + 20}, ${margin.top})`);
+                
+                legend.append('text')
+                    .attr('x', 0)
+                    .attr('y', -5)
+                    .attr('font-weight', 'bold')
+                    .text('Groups');
+                
+                groups.forEach((group, i) => {
+                    const legendRow = legend.append('g')
+                        .attr('transform', `translate(0, ${i * 20})`);
+                    
+                    legendRow.append('rect')
+                        .attr('width', 10)
+                        .attr('height', 10)
+                        .attr('fill', colorScale(group));
+                    
+                    legendRow.append('text')
+                        .attr('x', 15)
+                        .attr('y', 10)
+                        .text(group);
+                });
+            }
+            
+            // Add brush for selection, but only activate with shift key
+            let brushMode = false;
+            
+            const brush = d3.brush()
+                .extent([[margin.left, margin.top], [width - margin.right, height - margin.bottom]])
+                .on('start', () => {
+                    // Only allow brushing if in brush mode
+                    if (!brushMode) {
+                        svg.select('.brush').call(brush.move, null);
+                    }
+                })
+                .on('end', brushed);
+            
+            const brushG = svg.append('g')
+                .attr('class', 'brush')
+                .style('display', 'none')
+                .call(brush);
+            
+            // Add brush toggle button
+            const brushButton = d3.select('#pca-plot')
+                .append('div')
+                .attr('class', 'mt-2')
+                .append('button')
+                .attr('class', 'btn btn-sm btn-outline-secondary')
+                .text('Toggle Selection Brush')
+                .on('click', () => {
+                    brushMode = !brushMode;
+                    brushG.style('display', brushMode ? 'block' : 'none');
+                    brushButton.classed('active', brushMode);
+                    brushButton.text(brushMode ? 'Exit Selection Mode' : 'Toggle Selection Brush');
+                });
+            
+            function brushed(event) {
+                if (!event.selection) return;
+                
+                const [[x0, y0], [x1, y1]] = event.selection;
+                
+                data.forEach(d => {
+                    const cx = x(d.pc1);
+                    const cy = y(d.pc2);
+                    
+                    if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) {
+                        state.selectedSamples.add(d.sample);
+                    }
+                });
+                
+                // Update points
+                svg.selectAll('circle')
+                    .classed('selected', d => state.selectedSamples.has(d.sample));
+                
+                // Clear brush
+                svg.select('.brush').call(brush.move, null);
+            }
+        }
+        
+        // Toggle sample selection
+        function toggleSampleSelection(sample) {
+            if (state.selectedSamples.has(sample)) {
+                state.selectedSamples.delete(sample);
+            } else {
+                state.selectedSamples.add(sample);
+            }
+        }
+        
+        // Clear selection
+        function clearSelection() {
+            state.selectedSamples.clear();
+            d3.selectAll('#pca-plot circle').classed('selected', false);
+        }
+        
+        // Invert selection
+        function invertSelection() {
+            const allSamples = state.pca.map(d => d.sample);
+            allSamples.forEach(sample => {
+                if (state.selectedSamples.has(sample)) {
+                    state.selectedSamples.delete(sample);
+                } else {
+                    state.selectedSamples.add(sample);
+                }
+            });
+            d3.selectAll('#pca-plot circle').classed('selected', d => state.selectedSamples.has(d.sample));
+        }
+        
+        // Select all unassigned samples
+        function selectUnassigned() {
+            // Get all samples that are already in groups
+            const assignedSamples = new Set();
+            Object.values(state.sampleGroups).forEach(samples => {
+                samples.forEach(sample => assignedSamples.add(sample));
+            });
+            
+            // Select all samples that aren't in any group
+            state.selectedSamples.clear();
+            state.pca.forEach(d => {
+                if (!assignedSamples.has(d.sample)) {
+                    state.selectedSamples.add(d.sample);
+                }
+            });
+            
+            d3.selectAll('#pca-plot circle').classed('selected', d => state.selectedSamples.has(d.sample));
+        }
+        
+        // Show group modal
+        function showGroupModal() {
+            document.getElementById('selected-count').textContent = state.selectedSamples.size;
+            document.getElementById('group-name').value = '';
+            groupModal.show();
+        }
+        
+        // Save group
+        function saveGroup() {
+            const groupName = document.getElementById('group-name').value.trim();
+            
+            if (!groupName) {
+                alert('Please enter a group name');
+                return;
+            }
+            
+            if (state.selectedSamples.size === 0) {
+                alert('No samples selected');
+                return;
+            }
+            
+            // Save group
+            state.sampleGroups[groupName] = Array.from(state.selectedSamples);
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Update UI
+            renderSampleGroups();
+            renderPcaPlot(); // Re-render PCA to show updated groups
+            
+            // Clear selection
+            clearSelection();
+            
+            // Hide modal
+            groupModal.hide();
+        }
+        
+        // Render sample groups
+        function renderSampleGroups() {
+            const listContainer = document.getElementById('group-list');
+            const tableContainer = document.getElementById('group-table-container');
+            const tableBody = document.getElementById('group-table-body');
+            
+            // Clear containers
+            listContainer.innerHTML = '';
+            tableBody.innerHTML = '';
+            
+            if (Object.keys(state.sampleGroups).length === 0) {
+                listContainer.innerHTML = '<div class="alert alert-info">No groups created yet. Use the PCA plot to select samples and create groups.</div>';
+                tableContainer.style.display = 'none';
+                return;
+            }
+            
+            // Hide the list view and show the table view
+            listContainer.style.display = 'none';
+            tableContainer.style.display = 'block';
+            
+            // Get all group names for the dropdown
+            const groupNames = Object.keys(state.sampleGroups);
+            
+            // Get all samples across all groups
+            const allSamples = new Set();
+            const sampleToGroup = {};
+            
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                for (const sample of samples) {
+                    allSamples.add(sample);
+                    sampleToGroup[sample] = groupName;
+                }
+            }
+            
+            // Sort samples alphabetically
+            const sortedSamples = Array.from(allSamples).sort();
+            
+            // Create table rows for each sample
+            for (const sample of sortedSamples) {
+                const row = document.createElement('tr');
+                
+                // Sample name cell
+                const nameCell = document.createElement('td');
+                nameCell.textContent = sample;
+                
+                // Group dropdown cell
+                const groupCell = document.createElement('td');
+                const groupSelect = document.createElement('select');
+                groupSelect.className = 'form-select form-select-sm';
+                groupSelect.dataset.sample = sample;
+                
+                // Add options for each group
+                for (const group of groupNames) {
+                    const option = document.createElement('option');
+                    option.value = group;
+                    option.textContent = group;
+                    option.selected = (sampleToGroup[sample] === group);
+                    groupSelect.appendChild(option);
+                }
+                
+                // Add change event
+                groupSelect.addEventListener('change', function() {
+                    reassignSample(sample, this.value);
+                });
+                
+                groupCell.appendChild(groupSelect);
+                
+                // Actions cell
+                const actionsCell = document.createElement('td');
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn btn-sm btn-danger';
+                removeBtn.textContent = 'Remove';
+                removeBtn.onclick = () => removeSampleFromGroups(sample);
+                
+                actionsCell.appendChild(removeBtn);
+                
+                // Add cells to row
+                row.appendChild(nameCell);
+                row.appendChild(groupCell);
+                row.appendChild(actionsCell);
+                
+                // Add row to table
+                tableBody.appendChild(row);
+            }
+        }
+        
+        // Reassign a sample to a different group
+        function reassignSample(sample, newGroup) {
+            // Remove sample from all groups
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                state.sampleGroups[groupName] = samples.filter(s => s !== sample);
+            }
+            
+            // Add to new group
+            if (!state.sampleGroups[newGroup]) {
+                state.sampleGroups[newGroup] = [];
+            }
+            state.sampleGroups[newGroup].push(sample);
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Re-render PCA to show updated groups
+            renderPcaPlot();
+        }
+        
+        // Remove a sample from all groups
+        function removeSampleFromGroups(sample) {
+            for (const [groupName, samples] of Object.entries(state.sampleGroups)) {
+                state.sampleGroups[groupName] = samples.filter(s => s !== sample);
+            }
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Re-render the table and PCA
+            renderSampleGroups();
+            renderPcaPlot();
+        }
+        
+        // Delete group
+        function deleteGroup(groupName) {
+            if (confirm(`Are you sure you want to delete the group "${groupName}"?`)) {
+                delete state.sampleGroups[groupName];
+                
+                // Update sample to group mapping
+                updateSampleToGroupMapping();
+                
+                // Re-render the table and PCA
+                renderSampleGroups();
+                renderPcaPlot();
+            }
+        }
+        
+        // Use predefined groups
+        function usePredefinedGroups() {
+            if (Object.keys(state.predefinedGroups).length === 0) {
+                alert('No predefined groups available');
+                return;
+            }
+            
+            if (confirm('This will replace any existing groups. Continue?')) {
+                // Get all samples that appear in the PCA
+                const pcaSamples = new Set(state.pca.map(d => d.sample));
+                
+                // Filter predefined groups to only include samples that appear in the PCA
+                const filteredGroups = {};
+                for (const [groupName, samples] of Object.entries(state.predefinedGroups)) {
+                    filteredGroups[groupName] = samples.filter(sample => pcaSamples.has(sample));
+                }
+                
+                state.sampleGroups = filteredGroups;
+                
+                // Update sample to group mapping
+                updateSampleToGroupMapping();
+                
+                // Re-render the table and PCA
+                renderSampleGroups();
+                renderPcaPlot();
+            }
+        }
+        
+        // Show single sample modal
+        function showSingleSampleModal(sampleName) {
+            // Set the sample name
+            document.getElementById('single-sample-name').textContent = sampleName;
+            
+            // Populate the group dropdown
+            const groupSelect = document.getElementById('single-sample-group');
+            groupSelect.innerHTML = '<option value="">-- Select Group --</option>';
+            
+            for (const groupName in state.sampleGroups) {
+                const option = document.createElement('option');
+                option.value = groupName;
+                option.textContent = groupName;
+                groupSelect.appendChild(option);
+            }
+            
+            // Clear the new group name field
+            document.getElementById('new-group-name').value = '';
+            
+            // Store the sample name for later use
+            singleSampleModal._sampleName = sampleName;
+            
+            // Show the modal
+            singleSampleModal.show();
+        }
+        
+        // Assign single sample to group
+        function assignSingleSample() {
+            const sampleName = singleSampleModal._sampleName;
+            const selectedGroup = document.getElementById('single-sample-group').value;
+            const newGroupName = document.getElementById('new-group-name').value.trim();
+            
+            if (!selectedGroup && !newGroupName) {
+                alert('Please select an existing group or enter a new group name');
+                return;
+            }
+            
+            // Remove sample from all existing groups
+            for (const groupName in state.sampleGroups) {
+                state.sampleGroups[groupName] = state.sampleGroups[groupName].filter(s => s !== sampleName);
+            }
+            
+            // Add to selected group or create new group
+            const targetGroup = newGroupName || selectedGroup;
+            
+            if (!state.sampleGroups[targetGroup]) {
+                state.sampleGroups[targetGroup] = [];
+            }
+            
+            state.sampleGroups[targetGroup].push(sampleName);
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Update UI
+            renderSampleGroups();
+            renderPcaPlot();
+            
+            // Hide modal
+            singleSampleModal.hide();
+        }
+        
+        // Show merge groups modal
+        function showMergeGroupsModal() {
+            // Filter to only groups that have samples
+            const groupsWithSamples = Object.entries(state.sampleGroups)
+                .filter(([_, samples]) => samples.length > 0)
+                .map(([groupName, _]) => groupName);
+            
+            if (groupsWithSamples.length < 2) {
+                alert('You need at least two groups with samples to merge.');
+                return;
+            }
+            
+            // Populate source group dropdown
+            const sourceSelect = document.getElementById('source-group');
+            sourceSelect.innerHTML = '<option value="">-- Select Group --</option>';
+            
+            // Populate target group dropdown
+            const targetSelect = document.getElementById('target-group');
+            targetSelect.innerHTML = '<option value="">-- Select Group --</option>';
+            
+            for (const groupName of groupsWithSamples) {
+                // Add to source dropdown
+                const sourceOption = document.createElement('option');
+                sourceOption.value = groupName;
+                sourceOption.textContent = `${groupName} (${state.sampleGroups[groupName].length} samples)`;
+                sourceSelect.appendChild(sourceOption);
+                
+                // Add to target dropdown
+                const targetOption = document.createElement('option');
+                targetOption.value = groupName;
+                targetOption.textContent = `${groupName} (${state.sampleGroups[groupName].length} samples)`;
+                targetSelect.appendChild(targetOption);
+            }
+            
+            // Clear the merged group name field
+            document.getElementById('merged-group-name').value = '';
+            
+            // Reset the delete source checkbox
+            document.getElementById('delete-source-group').checked = true;
+            
+            // Show the modal
+            mergeGroupsModal.show();
+        }
+        
+        // Merge groups
+        function mergeGroups() {
+            const sourceGroup = document.getElementById('source-group').value;
+            const targetGroup = document.getElementById('target-group').value;
+            const newGroupName = document.getElementById('merged-group-name').value.trim();
+            const deleteSource = document.getElementById('delete-source-group').checked;
+            
+            if (!sourceGroup || !targetGroup) {
+                alert('Please select both source and target groups');
+                return;
+            }
+            
+            if (sourceGroup === targetGroup) {
+                alert('Source and target groups must be different');
+                return;
+            }
+            
+            // Get samples from both groups
+            const sourceSamples = state.sampleGroups[sourceGroup] || [];
+            const targetSamples = state.sampleGroups[targetGroup] || [];
+            
+            // Create a set to avoid duplicates
+            const mergedSamples = new Set([...targetSamples, ...sourceSamples]);
+            
+            // Determine the final group name
+            const finalGroupName = newGroupName || targetGroup;
+            
+            // Create or update the target group
+            state.sampleGroups[finalGroupName] = Array.from(mergedSamples);
+            
+            // If using a new name and not deleting source, also delete target
+            if (newGroupName && newGroupName !== targetGroup && newGroupName !== sourceGroup) {
+                if (deleteSource) {
+                    delete state.sampleGroups[sourceGroup];
+                }
+                delete state.sampleGroups[targetGroup];
+            } 
+            // If using target name and deleting source
+            else if (deleteSource && finalGroupName === targetGroup) {
+                delete state.sampleGroups[sourceGroup];
+            }
+            // If using source name
+            else if (finalGroupName === sourceGroup) {
+                delete state.sampleGroups[targetGroup];
+            }
+            
+            // Update sample to group mapping
+            updateSampleToGroupMapping();
+            
+            // Update UI
+            renderSampleGroups();
+            renderPcaPlot();
+            
+            // Hide modal
+            mergeGroupsModal.hide();
+        }
+        
+        // Update missingness threshold
+        function updateMissingnessThreshold(event) {
+            const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
+            state.thresholds.missingness = value;
+            
+            // Update threshold line
+            d3.select('#missingness-threshold-line')
+                .attr('x1', state.missingnessScale(value))
+                .attr('x2', state.missingnessScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update depth threshold
+        function updateDepthThreshold(event) {
+            const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
+            state.thresholds.depth = value;
+            
+            // Update threshold line
+            d3.select('#depth-threshold-line')
+                .attr('x1', state.depthScale(value))
+                .attr('x2', state.depthScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update heterozygosity min threshold
+        function updateHetMinThreshold(event) {
+            const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
+            state.thresholds.hetMin = value;
+            
+            // Update threshold line
+            d3.select('#het-min-threshold-line')
+                .attr('x1', state.hetScale(value))
+                .attr('x2', state.hetScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update heterozygosity max threshold
+        function updateHetMaxThreshold(event) {
+            const value = parseFloat(event.target.value);
+            if (isNaN(value)) return;
+            
+            state.thresholds.hetMax = value;
+            
+            // Update threshold line
+            d3.select('#het-max-threshold-line')
+                .attr('x1', state.hetScale(value))
+                .attr('x2', state.hetScale(value));
+            
+            // Update filtered samples
+            updateFilteredSamples();
+        }
+        
+        // Update filtered samples based on thresholds
+        function updateFilteredSamples() {
+            state.filteredSamples.clear();
+            
+            state.sampleStats.forEach(sample => {
+                const missingRate = sample.missing_rate || 0;
+                const meanDepth = sample.mean_depth || 0;
+                const hetRate = sample.het_rate || 0;
+                
+                if (missingRate > state.thresholds.missingness || 
+                    meanDepth < state.thresholds.depth ||
+                    hetRate < state.thresholds.hetMin ||
+                    hetRate > state.thresholds.hetMax) {
+                    state.filteredSamples.add(sample.id);
+                }
+            });
+            
+            // Update PCA plot to show filtered samples with low opacity
+            d3.selectAll('#pca-plot circle')
+                .classed('filtered', d => state.filteredSamples.has(d.sample));
+        }
+        
+        // Submit sample filters
+        async function submitSampleFilters() {
+            if (Object.keys(state.sampleGroups).length === 0) {
+                alert('Please create at least one sample group before continuing.');
+                return;
+            }
+
+            try {
+                showLoading(true);
+                
+                // Apply missingness, depth, and heterozygosity thresholds to filter samples
+                for (const groupName in state.sampleGroups) {
+                    state.sampleGroups[groupName] = state.sampleGroups[groupName].filter(sample => {
+                        const sampleData = state.sampleStats.find(s => s.id === sample);
+                        if (!sampleData) return false;
+                        
+                        const missingRate = sampleData.missing_rate || 0;
+                        const meanDepth = sampleData.mean_depth || 0;
+                        const hetRate = sampleData.het_rate || 0;
+                        
+                        return missingRate <= state.thresholds.missingness && 
+                               meanDepth >= state.thresholds.depth &&
+                               hetRate >= state.thresholds.hetMin &&
+                               hetRate <= state.thresholds.hetMax;
+                    });
+                }
+                
+                if (state.offlineMode) {
+                    // In offline mode, download a JSON file with the groups
+                    const jsonData = {
+                        groups: state.sampleGroups
+                    };
+                    
+                    const blob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
+                    saveAs(blob, 'snpsnip_sample_groups.json');
+                    
+                    // Show instructions
+                    alert('Sample groups have been saved to a JSON file. Please provide this file to the next invocation of SNPSnip using the --next parameter.');
+                } else {
+                    // Submit to server in online mode
+                    const response = await fetch('/api/submit_sample_filters', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            groups: state.sampleGroups
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        // Reload state and show variant filtering
+                        await loadState();
+                    } else {
+                        alert('Error submitting sample filters');
+                    }
+                }
+            } catch (error) {
+                console.error('Error submitting sample filters:', error);
+                alert('Error submitting sample filters. Please check the console for details.');
+            } finally {
+                showLoading(false);
+            }
+        }
+        
+        // Render variant filtering UI
+        function renderVariantFiltering() {
+            const container = document.getElementById('variant-groups');
+            container.innerHTML = '';
+            
+            for (const groupName in state.sampleGroups) {
+                const groupStats = state.variantStats[groupName] || {};
+                
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'group-container mb-4';
+                
+                const header = document.createElement('h3');
+                header.textContent = `Group: ${groupName}`;
+                
+                groupDiv.appendChild(header);
+                
+                // Create metric cards
+                const metricsRow = document.createElement('div');
+                metricsRow.className = 'row';
+                
+                // Quality
+                if (groupStats.qual) {
+                    const qualDiv = createMetricCard(
+                        'Quality',
+                        groupStats.qual,
+                        `${groupName}-qual`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].qual.min = min;
+                            state.variantThresholds[groupName].qual.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(qualDiv);
+                }
+                
+                // Depth
+                if (groupStats.depth) {
+                    const depthDiv = createMetricCard(
+                        'Depth',
+                        groupStats.depth,
+                        `${groupName}-depth`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].depth.min = min;
+                            state.variantThresholds[groupName].depth.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(depthDiv);
+                }
+                
+                // Allele frequency
+                if (groupStats.af) {
+                    const afDiv = createMetricCard(
+                        'Allele Frequency',
+                        groupStats.af,
+                        `${groupName}-af`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].af.min = min;
+                            state.variantThresholds[groupName].af.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(afDiv);
+                }
+                
+                // Missing rate
+                if (groupStats.missing) {
+                    const missingDiv = createMetricCard(
+                        'Missing Rate',
+                        groupStats.missing,
+                        `${groupName}-missing`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].missing.min = min;
+                            state.variantThresholds[groupName].missing.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(missingDiv);
+                }
+                
+                // Excess Heterozygosity (-log10 p-value)
+                if (groupStats.exhet) {
+                    const exhetDiv = createMetricCard(
+                        'Excess Heterozygosity (-log10 p)',
+                        groupStats.exhet,
+                        `${groupName}-exhet`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].exhet.min = min;
+                            state.variantThresholds[groupName].exhet.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(exhetDiv);
+                }
+                
+                groupDiv.appendChild(metricsRow);
+                container.appendChild(groupDiv);
+            }
+        }
+        
+        // Create metric card
+        function createMetricCard(title, data, id, onThresholdChange) {
+            const colDiv = document.createElement('div');
+            colDiv.className = 'col-md-6 mb-3';
+            
+            const cardDiv = document.createElement('div');
+            cardDiv.className = 'card';
+            
+            const cardHeader = document.createElement('div');
+            cardHeader.className = 'card-header';
+            cardHeader.textContent = title;
+            
+            const cardBody = document.createElement('div');
+            cardBody.className = 'card-body';
+            
+            // Create histogram
+            const histogramDiv = document.createElement('div');
+            histogramDiv.id = `${id}-histogram`;
+            histogramDiv.className = 'histogram';
+            
+            // Create threshold controls
+            const controlsDiv = document.createElement('div');
+            controlsDiv.className = 'd-flex justify-content-between align-items-center mt-2';
+            
+            const minGroup = document.createElement('div');
+            minGroup.className = 'input-group input-group-sm me-2';
+            
+            const minLabel = document.createElement('span');
+            minLabel.className = 'input-group-text';
+            minLabel.textContent = 'Min';
+            
+            const minInput = document.createElement('input');
+            minInput.type = 'number';
+            minInput.className = 'form-control';
+            minInput.id = `${id}-min`;
+            minInput.placeholder = 'Min';
+            minInput.addEventListener('change', () => {
+                const value = minInput.value ? parseFloat(minInput.value) : null;
+                onThresholdChange(value, maxInput.value ? parseFloat(maxInput.value) : null);
+                updateThresholdLines(id, value, maxInput.value ? parseFloat(maxInput.value) : null);
+            });
+            
+            minGroup.appendChild(minLabel);
+            minGroup.appendChild(minInput);
+            
+            const maxGroup = document.createElement('div');
+            maxGroup.className = 'input-group input-group-sm';
+            
+            const maxLabel = document.createElement('span');
+            maxLabel.className = 'input-group-text';
+            maxLabel.textContent = 'Max';
+            
+            const maxInput = document.createElement('input');
+            maxInput.type = 'number';
+            maxInput.className = 'form-control';
+            maxInput.id = `${id}-max`;
+            maxInput.placeholder = 'Max';
+            maxInput.addEventListener('change', () => {
+                const value = maxInput.value ? parseFloat(maxInput.value) : null;
+                onThresholdChange(minInput.value ? parseFloat(minInput.value) : null, value);
+                updateThresholdLines(id, minInput.value ? parseFloat(minInput.value) : null, value);
+            });
+            
+            maxGroup.appendChild(maxLabel);
+            maxGroup.appendChild(maxInput);
+            
+            controlsDiv.appendChild(minGroup);
+            controlsDiv.appendChild(maxGroup);
+            
+            cardBody.appendChild(histogramDiv);
+            cardBody.appendChild(controlsDiv);
+            
+            cardDiv.appendChild(cardHeader);
+            cardDiv.appendChild(cardBody);
+            
+            colDiv.appendChild(cardDiv);
+            
+            // Render histogram after adding to DOM
+            setTimeout(() => {
+                renderVariantHistogram(data, id);
+            }, 0);
+            
+            return colDiv;
+        }
+        
+        // Render variant histogram
+        function renderVariantHistogram(data, id) {
+            const bins = data.bins;
+            const counts = data.counts;
+            
+            if (!bins || !counts || bins.length === 0 || counts.length === 0) {
+                document.getElementById(`${id}-histogram`).innerHTML = '<div class="alert alert-warning">No data available</div>';
+                return;
+            }
+            
+            const width = 400;
+            const height = 200;
+            const margin = { top: 20, right: 30, bottom: 30, left: 40 };
+            
+            const svg = d3.select(`#${id}-histogram`)
+                .html('')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            const x = d3.scaleLinear()
+                .domain([bins[0], bins[bins.length - 1]])
+                .range([margin.left, width - margin.right]);
+            
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(counts)])
+                .range([height - margin.bottom, margin.top]);
+            
+            svg.append('g')
+                .attr('transform', `translate(0,${height - margin.bottom})`)
+                .call(d3.axisBottom(x));
+            
+            svg.append('g')
+                .attr('transform', `translate(${margin.left},0)`)
+                .call(d3.axisLeft(y));
+            
+            // Create bars
+            for (let i = 0; i < bins.length; i++) {
+                svg.append('rect')
+                    .attr('x', x(bins[i]))
+                    .attr('width', i < bins.length - 1 ? x(bins[i + 1]) - x(bins[i]) : 0)
+                    .attr('y', y(counts[i]))
+                    .attr('height', y(0) - y(counts[i]));
+            }
+            
+            // Add min threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', `${id}-min-line`)
+                .style('display', 'none')
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+            
+            // Add max threshold line
+            svg.append('line')
+                .attr('class', 'threshold-line')
+                .attr('id', `${id}-max-line`)
+                .style('display', 'none')
+                .attr('y1', margin.top)
+                .attr('y2', height - margin.bottom);
+            
+            // Store the x scale for later use
+            window[`${id}Scale`] = x;
+        }
+        
+        // Update threshold lines
+        function updateThresholdLines(id, min, max) {
+            const scale = window[`${id}Scale`];
+            if (!scale) return;
+            
+            const minLine = d3.select(`#${id}-min-line`);
+            const maxLine = d3.select(`#${id}-max-line`);
+            
+            if (min !== null) {
+                minLine
+                    .style('display', 'block')
+                    .attr('x1', scale(min))
+                    .attr('x2', scale(min));
+            } else {
+                minLine.style('display', 'none');
+            }
+            
+            if (max !== null) {
+                maxLine
+                    .style('display', 'block')
+                    .attr('x1', scale(max))
+                    .attr('x2', scale(max));
+            } else {
+                maxLine.style('display', 'none');
+            }
+        }
+        
+        // Submit variant filters
+        async function submitVariantFilters() {
+            try {
+                showLoading(true);
+                
+                if (state.offlineMode) {
+                    // In offline mode, download a JSON file with the thresholds
+                    const jsonData = {
+                        thresholds: state.variantThresholds
+                    };
+                    
+                    const blob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
+                    saveAs(blob, 'snpsnip_variant_thresholds.json');
+                    
+                    // Show instructions
+                    alert('Variant thresholds have been saved to a JSON file. Please provide this file to the next invocation of SNPSnip using the --next parameter.');
+                } else {
+                    // Submit to server in online mode
+                    const response = await fetch('/api/submit_variant_filters', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            thresholds: state.variantThresholds
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        // Show completion
+                        showCompletion(result.output_files || []);
+                    } else {
+                        alert('Error submitting variant filters');
+                    }
+                }
+            } catch (error) {
+                console.error('Error submitting variant filters:', error);
+                alert('Error submitting variant filters. Please check the console for details.');
+            } finally {
+                showLoading(false);
+            }
+        }
+    </script>
+</body>
+</html>
