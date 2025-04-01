@@ -106,7 +106,7 @@
             <p>Filter samples based on quality metrics and PCA clustering.</p>
             
             <div class="row mb-4">
-                <div class="col-md-4">
+                <div class="col-12 col-xl-6">
                     <div class="card">
                         <div class="card-header">Sample Missingness</div>
                         <div class="card-body">
@@ -121,7 +121,7 @@
                     </div>
                 </div>
                 
-                <div class="col-md-4">
+                <div class="col-12 col-xl-6">
                     <div class="card">
                         <div class="card-header">Sample Mean Depth</div>
                         <div class="card-body">
@@ -136,7 +136,7 @@
                     </div>
                 </div>
                 
-                <div class="col-md-4">
+                <div class="col-12 col-xl-6">
                     <div class="card">
                         <div class="card-header">Sample Heterozygosity</div>
                         <div class="card-body">
@@ -161,7 +161,28 @@
             <div class="card mb-4">
                 <div class="card-header">Sample PCA</div>
                 <div class="card-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-text">X-axis:</span>
+                                <select id="pca-x-axis" class="form-select">
+                                    <!-- Options will be populated by JavaScript -->
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="input-group">
+                                <span class="input-group-text">Y-axis:</span>
+                                <select id="pca-y-axis" class="form-select">
+                                    <!-- Options will be populated by JavaScript -->
+                                </select>
+                            </div>
+                        </div>
+                    </div>
                     <div id="pca-plot" class="pca-plot"></div>
+                    <div id="pca-variance-info" class="text-muted mt-2 mb-3">
+                        <!-- Variance explained info will be shown here -->
+                    </div>
                     <div class="mt-3">
                         <button id="create-group" class="btn btn-primary">Create Group from Selection</button>
                         <button id="clear-selection" class="btn btn-secondary">Clear Selection</button>
@@ -321,7 +342,11 @@
         // Global state
         const state = {
             sampleStats: [],
-            pca: [],
+            pca: {
+                samples: [],
+                variance_explained: [],
+                n_components: 0
+            },
             variantStats: {},
             sampleGroups: {},
             predefinedGroups: {},
@@ -337,7 +362,10 @@
             // Map of sample ID to group name
             sampleToGroup: {},
             // Offline mode flag
-            offlineMode: false
+            offlineMode: false,
+            // PCA axis selection
+            pcaXAxis: "pc1",
+            pcaYAxis: "pc2"
         };
         
         // Embedded data for offline mode
@@ -371,6 +399,8 @@
             document.getElementById('assign-sample').addEventListener('click', assignSingleSample);
             document.getElementById('merge-groups').addEventListener('click', showMergeGroupsModal);
             document.getElementById('perform-merge').addEventListener('click', mergeGroups);
+            document.getElementById('pca-x-axis').addEventListener('change', updatePcaAxes);
+            document.getElementById('pca-y-axis').addEventListener('change', updatePcaAxes);
             
             // Check for embedded data (offline mode)
             const embeddedDataElement = document.getElementById('embedded-data');
@@ -404,6 +434,9 @@
                     // Load sample stats and PCA data from embedded data
                     state.sampleStats = embeddedData.sample_stats;
                     state.pca = embeddedData.pca;
+                    
+                    // Initialize PCA axis selectors
+                    initializePcaAxisSelectors();
                     
                     // Render visualizations
                     renderMissingnessHistogram();
@@ -524,6 +557,9 @@
             const pcaResponse = await fetch('/api/pca');
             state.pca = await pcaResponse.json();
             
+            // Initialize PCA axis selectors
+            initializePcaAxisSelectors();
+            
             // Render visualizations
             renderMissingnessHistogram();
             renderDepthHistogram();
@@ -532,6 +568,52 @@
             
             // Initialize filtered samples
             updateFilteredSamples();
+        }
+        
+        // Initialize PCA axis selectors
+        function initializePcaAxisSelectors() {
+            const xAxisSelect = document.getElementById('pca-x-axis');
+            const yAxisSelect = document.getElementById('pca-y-axis');
+            
+            // Clear existing options
+            xAxisSelect.innerHTML = '';
+            yAxisSelect.innerHTML = '';
+            
+            // Get number of components
+            const nComponents = state.pca.n_components || 
+                               (state.pca.samples && state.pca.samples.length > 0 ? 
+                                Object.keys(state.pca.samples[0]).filter(k => k.startsWith('pc')).length : 
+                                2);
+            
+            // Create options for each component
+            for (let i = 1; i <= nComponents; i++) {
+                const xOption = document.createElement('option');
+                xOption.value = `pc${i}`;
+                xOption.textContent = `PC${i} (${state.pca.variance_explained ? 
+                    state.pca.variance_explained[i-1].toFixed(1) + '%' : 
+                    'N/A'})`;
+                xAxisSelect.appendChild(xOption);
+                
+                const yOption = document.createElement('option');
+                yOption.value = `pc${i}`;
+                yOption.textContent = `PC${i} (${state.pca.variance_explained ? 
+                    state.pca.variance_explained[i-1].toFixed(1) + '%' : 
+                    'N/A'})`;
+                yAxisSelect.appendChild(yOption);
+            }
+            
+            // Set default selections
+            xAxisSelect.value = 'pc1';
+            yAxisSelect.value = 'pc2';
+            state.pcaXAxis = 'pc1';
+            state.pcaYAxis = 'pc2';
+        }
+        
+        // Update PCA axes when selection changes
+        function updatePcaAxes() {
+            state.pcaXAxis = document.getElementById('pca-x-axis').value;
+            state.pcaYAxis = document.getElementById('pca-y-axis').value;
+            renderPcaPlot();
         }
         
         // Load data for variant filtering
@@ -787,7 +869,22 @@
         
         // Render PCA plot
         function renderPcaPlot() {
-            const data = state.pca;
+            // Get the data in the right format
+            let data;
+            if (state.pca.samples) {
+                // New format with samples array
+                data = state.pca.samples;
+            } else if (Array.isArray(state.pca)) {
+                // Old format with direct array
+                data = state.pca;
+            } else {
+                console.error("Invalid PCA data format");
+                return;
+            }
+            
+            // Get the selected axes
+            const xAxis = state.pcaXAxis || 'pc1';
+            const yAxis = state.pcaYAxis || 'pc2';
             
             // Update the sample to group mapping
             updateSampleToGroupMapping();
@@ -804,11 +901,11 @@
             
             // Create scales
             const x = d3.scaleLinear()
-                .domain(d3.extent(data, d => d.pc1))
+                .domain(d3.extent(data, d => d[xAxis]))
                 .range([margin.left, width - margin.right]);
             
             const y = d3.scaleLinear()
-                .domain(d3.extent(data, d => d.pc2))
+                .domain(d3.extent(data, d => d[yAxis]))
                 .range([height - margin.bottom, margin.top]);
             
             // Add axes
@@ -820,19 +917,43 @@
                 .attr('transform', `translate(${margin.left},0)`)
                 .call(d3.axisLeft(y).tickFormat(d3.format('.2f')));
             
-            // Add axis labels
+            // Add axis labels with variance explained if available
+            const xAxisLabel = xAxis.toUpperCase();
+            const yAxisLabel = yAxis.toUpperCase();
+            
             svg.append('text')
                 .attr('x', width / 2)
                 .attr('y', height - 5)
                 .attr('text-anchor', 'middle')
-                .text('PC1');
+                .text(xAxisLabel);
             
             svg.append('text')
                 .attr('transform', 'rotate(-90)')
                 .attr('x', -height / 2)
                 .attr('y', 15)
                 .attr('text-anchor', 'middle')
-                .text('PC2');
+                .text(yAxisLabel);
+            
+            // Display variance explained information
+            const varianceInfo = document.getElementById('pca-variance-info');
+            if (state.pca.variance_explained) {
+                const xAxisIndex = parseInt(xAxis.replace('pc', '')) - 1;
+                const yAxisIndex = parseInt(yAxis.replace('pc', '')) - 1;
+                
+                if (xAxisIndex >= 0 && yAxisIndex >= 0 && 
+                    xAxisIndex < state.pca.variance_explained.length && 
+                    yAxisIndex < state.pca.variance_explained.length) {
+                    
+                    const xVariance = state.pca.variance_explained[xAxisIndex].toFixed(2);
+                    const yVariance = state.pca.variance_explained[yAxisIndex].toFixed(2);
+                    
+                    varianceInfo.textContent = `Variance explained: ${xAxisLabel} = ${xVariance}%, ${yAxisLabel} = ${yVariance}%`;
+                } else {
+                    varianceInfo.textContent = '';
+                }
+            } else {
+                varianceInfo.textContent = '';
+            }
             
             // Get all unique groups from the current sample-to-group mapping
             const groups = [...new Set(Object.values(state.sampleToGroup))].filter(Boolean);
@@ -851,8 +972,8 @@
                 .selectAll('circle')
                 .data(data)
                 .join('circle')
-                .attr('cx', d => x(d.pc1))
-                .attr('cy', d => y(d.pc2))
+                .attr('cx', d => x(d[xAxis]))
+                .attr('cy', d => y(d[yAxis]))
                 .attr('r', 5)
                 .attr('fill', d => {
                     const group = state.sampleToGroup[d.sample];
@@ -1195,16 +1316,7 @@
             }
             
             if (confirm('This will replace any existing groups. Continue?')) {
-                // Get all samples that appear in the PCA
-                const pcaSamples = new Set(state.pca.map(d => d.sample));
-                
-                // Filter predefined groups to only include samples that appear in the PCA
-                const filteredGroups = {};
-                for (const [groupName, samples] of Object.entries(state.predefinedGroups)) {
-                    filteredGroups[groupName] = samples.filter(sample => pcaSamples.has(sample));
-                }
-                
-                state.sampleGroups = filteredGroups;
+                state.sampleGroups = state.predefinedGroups;
                 
                 // Update sample to group mapping
                 updateSampleToGroupMapping();

@@ -217,6 +217,9 @@ class SNPSnip:
                     try:
                         sample = row[sample_column]
                         group = row[group_column]
+                        if sample not in self.samples:
+                            logger.debug(f"Skip group mapping {sample} -> {group} as {sample} isn't in our VCF")
+                            continue
                         if group not in groups:
                             groups[group] = []
                         groups[group].append(sample)
@@ -620,15 +623,22 @@ class SNPSnip:
 
         self.state["subset_vcf"] = filled_vcf
 
+    @property
+    def samples(self):
+        if self.state.get("sample_names"):
+            return self.state["sample_names"]
+        # Get sample names
+        samples_result = self._run_bcftools(["query", "-l", self.vcf_file])
+        samples = samples_result.stdout.strip().split('\n')
+        self.state["sample_names"] = samples
+        return samples
+
     def _compute_sample_stats(self):
         """Compute per-sample statistics."""
         logger.info("Computing sample statistics...")
 
         subset_vcf = self.state["subset_vcf"]
 
-        # Get sample names
-        samples_result = self._run_bcftools(["query", "-l", subset_vcf])
-        samples = samples_result.stdout.strip().split('\n')
 
         # Compute per-sample missingness
         missing_file = str(self.temp_dir / "vcf_stats.txt")
@@ -642,7 +652,7 @@ class SNPSnip:
         )
 
         # Parse stats files
-        sample_stats = {sample: {"id": sample} for sample in samples}
+        sample_stats = {sample: {"id": sample} for sample in self.samples}
 
         # Process missing data
         try:
@@ -720,20 +730,28 @@ class SNPSnip:
                     else:
                         geno_array[i, mask] = 0
 
-            # Run PCA
-            pca = PCA(n_components=2)
+            # Run PCA with up to 10 components
+            n_components = min(10, geno_array.shape[0], geno_array.shape[1])
+            pca = PCA(n_components=n_components)
             pca_result = pca.fit_transform(geno_array)
 
             # Format PCA results
             pca_data = []
             for i, sample in enumerate(samples):
-                pca_data.append({
-                    "sample": sample,
-                    "pc1": float(pca_result[i, 0]),
-                    "pc2": float(pca_result[i, 1])
-                })
+                sample_data = {"sample": sample}
+                # Add all PC coordinates
+                for j in range(n_components):
+                    sample_data[f"pc{j+1}"] = float(pca_result[i, j])
+                pca_data.append(sample_data)
 
-            self.state["pca"] = pca_data
+            # Add variance explained for each component
+            variance_explained = pca.explained_variance_ratio_ * 100
+            
+            self.state["pca"] = {
+                "samples": pca_data,
+                "variance_explained": variance_explained.tolist(),
+                "n_components": n_components
+            }
 
         except Exception as e:
             logger.error(f"Error computing PCA: {e}")
