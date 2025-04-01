@@ -106,7 +106,7 @@
             <p>Filter samples based on quality metrics and PCA clustering.</p>
             
             <div class="row mb-4">
-                <div class="col-md-4">
+                <div class="col-md-6">
                     <div class="card">
                         <div class="card-header">Sample Missingness</div>
                         <div class="card-body">
@@ -121,7 +121,7 @@
                     </div>
                 </div>
                 
-                <div class="col-md-4">
+                <div class="col-md-6">
                     <div class="card">
                         <div class="card-header">Sample Mean Depth</div>
                         <div class="card-body">
@@ -136,7 +136,7 @@
                     </div>
                 </div>
                 
-                <div class="col-md-4">
+                <div class="col-md-6">
                     <div class="card">
                         <div class="card-header">Sample Heterozygosity</div>
                         <div class="card-body">
@@ -1316,16 +1316,7 @@
             }
             
             if (confirm('This will replace any existing groups. Continue?')) {
-                // Get all samples that appear in the PCA
-                const pcaSamples = new Set(state.pca.map(d => d.sample));
-                
-                // Filter predefined groups to only include samples that appear in the PCA
-                const filteredGroups = {};
-                for (const [groupName, samples] of Object.entries(state.predefinedGroups)) {
-                    filteredGroups[groupName] = samples.filter(sample => pcaSamples.has(sample));
-                }
-                
-                state.sampleGroups = filteredGroups;
+                state.sampleGroups = state.predefinedGroups;
                 
                 // Update sample to group mapping
                 updateSampleToGroupMapping();
