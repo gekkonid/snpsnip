@@ -24,6 +24,7 @@ import multiprocessing
 import uuid
 import base64
 from concurrent.futures import ProcessPoolExecutor
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 
@@ -168,6 +169,16 @@ class SNPSnip:
                 return None
         return None
 
+    def _validate_groups(self):
+        newgroups = {}
+        for group, samples in self.state.get("sample_groups", {}).items():
+            ctr = Counter(samples)
+            for k, v in ctr.most_common():
+                if v > 1:
+                    print(f"IGNORING duplicated sample in {group}: {k} (seen {v} times)")
+            newgroups[group] = list(set(samples))
+        self.state["sample_groups"] =  newgroups
+
     def _load_next_file(self):
         """Load data from a next file (downloaded from previous step)."""
         try:
@@ -178,6 +189,7 @@ class SNPSnip:
             if "groups" in next_data:
                 # This is from sample filtering
                 self.state["sample_groups"] = next_data["groups"]
+                self._validate_groups()
                 self.state["stage"] = "sample_filtered"
                 logger.info(f"Loaded sample groups from {self.next_file}")
             elif "thresholds" in next_data:
@@ -230,6 +242,7 @@ class SNPSnip:
             # Store all predefined groups
             self.state["predefined_groups"] = groups
             self.state["sample_groups"] = groups.copy()
+            self._validate_groups()
             logger.info(f"Loaded {len(groups)} groups with {sum(len(samples) for samples in groups.values())} samples")
         except Exception as e:
             logger.error(f"Error loading groups file: {e}")
@@ -283,6 +296,7 @@ class SNPSnip:
         def submit_sample_filters():
             data = request.json
             self.state["sample_groups"] = data["groups"]
+            self._validate_groups()
             self.state["stage"] = "sample_filtered"
             self._save_state()
 
@@ -538,7 +552,7 @@ class SNPSnip:
         if merge_cmd is None:
             # Check if output is likely VCF or text
             if is_vcf:
-                merge_cmd = ["bcftools", "concat", "--allow-overlaps", "--verbose", "0", out_format, "--threads", str(processes), "--write-index", "-o", output_file]
+                merge_cmd = ["bcftools", "concat", "--no-version", "--allow-overlaps", "--verbose", "0", out_format, "--threads", str(processes), "--write-index", "-o", output_file]
             else:
                 merge_cmd = ["cat"]
 
