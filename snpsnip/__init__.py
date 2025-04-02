@@ -941,13 +941,14 @@ class SNPSnip:
                 stats["ac"] = self._compute_histogram(ac_values)
                 
                 # Adjust depth to be per-sample
-                if "depth" in stats and len(samples) > 0:
-                    # Create a copy of the depth histogram
-                    depth_per_sample = {
-                        "bins": [bin_val / len(samples) for bin_val in stats["depth"]["bins"]],
-                        "counts": stats["depth"]["counts"].copy()
-                    }
-                    stats["depth"] = depth_per_sample
+                # This is probably a bad idea but I am keeping it around in case I change my mind
+                #if "depth" in stats and len(samples) > 0:
+                #    # Create a copy of the depth histogram
+                #    depth_per_sample = {
+                #        "bins": [bin_val / len(samples) for bin_val in stats["depth"]["bins"]],
+                #        "counts": stats["depth"]["counts"].copy()
+                #    }
+                #    stats["depth"] = depth_per_sample
 
                 self.state["variant_stats"][group_name] = stats
 
