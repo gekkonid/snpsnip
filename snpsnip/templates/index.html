@@ -1109,7 +1109,7 @@
         
         // Invert selection
         function invertSelection() {
-            const allSamples = state.pca.map(d => d.sample);
+            const allSamples = state.pca.samples.map(d => d.sample);
             allSamples.forEach(sample => {
                 if (state.selectedSamples.has(sample)) {
                     state.selectedSamples.delete(sample);
@@ -1609,7 +1609,8 @@
                 if (state.offlineMode) {
                     // In offline mode, download a JSON file with the groups
                     const jsonData = {
-                        groups: state.sampleGroups
+                        groups: state.sampleGroups,
+                        sample_thresholds: state.thresholds
                     };
                     
                     const blob = new Blob([JSON.stringify(jsonData, null, 2)], {type: 'application/json'});
@@ -1625,7 +1626,8 @@
                             'Content-Type': 'application/json'
                         },
                         body: JSON.stringify({
-                            groups: state.sampleGroups
+                            groups: state.sampleGroups,
+                            sample_thresholds: state.thresholds
                         })
                     });
                     
