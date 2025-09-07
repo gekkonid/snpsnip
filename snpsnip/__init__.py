@@ -23,6 +23,7 @@ import csv
 import multiprocessing
 import uuid
 import base64
+import webbrowser
 from concurrent.futures import ProcessPoolExecutor
 from collections import Counter
 from pathlib import Path
@@ -44,6 +45,55 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("snpsnip")
+
+
+def get_chroms_fai(fai):
+    res = {}
+    with open(fai) as fh:
+        for line in fh:
+            if not line or line.startswith('#'):
+                continue
+            parts = line.rstrip().split('\t')
+            try:
+                chrom = parts[0]
+                length = int(parts[1])
+                res[chrom] = length
+            except ValueError as exc:
+                print(f"ERROR parsing chrom length from FAI: {line}.")
+                res[chrom] = None
+    return res
+
+def get_chroms_vcf(vcf):
+    contigs_cmd = ["bcftools", "index", "--stats", vcf]
+    logger.debug(f"Getting contigs: {shlex.join(contigs_cmd)}")
+    result = subprocess.run(contigs_cmd, text=True, capture_output=True, check=True)
+    res = {}
+
+    for line in result.stdout.strip().split('\n'):
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 2:
+            try:
+                chrom = parts[0]
+                length = int(parts[1])
+                res[chrom] = length
+            except ValueError as exc:
+                print(f"ERROR parsing chrom length from vcf header: {line}. Consider using --fai")
+                res[chrom] = None
+    return res
+
+def regions_from_chroms(chroms, region_size=1_000_000):
+    regions = []
+    for chrom, clen in chroms.items():
+        if clen is None or clen < region_size:
+            regions.append(chrom)
+            continue
+        for start in range(1, clen, region_size):
+            end = min(start + region_size - 1, clen)
+            regions.append(f"{chrom}:{start}-{end}")
+    return regions
+
 
 # Standalone function for processing a region (needed for multiprocessing)
 def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True):
@@ -124,6 +174,12 @@ class SNPSnip:
         self.host = args.host
         self.port = args.port
         self.subset_freq = args.subset_freq
+
+        # Get list of chromosomes and their lengths
+        if self.args.fai:
+            self.chroms = get_chroms_fai(self.args.fai)
+        else:
+            self.chroms = get_chroms_vcf(self.vcf_file)
 
         # Initial filters
         self.maf = args.maf
@@ -446,6 +502,9 @@ class SNPSnip:
         self.server_thread.daemon = True
         self.server_thread.start()
 
+        time.sleep(0.5)
+        webbrowser.open(f"http://{self.host}:{self.port}")
+
         try:
             # Keep running until processing is completed
             while self.server_thread.is_alive() and not self.state.get("completed", False):
@@ -511,30 +570,8 @@ class SNPSnip:
         temp_dir_str = str(temp_dir)
         logger.info(f"Running {' | '.join(shlex.join(x) for x in pipeline_cmds)} in parallel")
 
-        # Get list of chromosomes and their lengths
-        contigs_cmd = ["bcftools", "index", "--stats", input_file]
-        logger.debug(f"Getting contigs: {shlex.join(contigs_cmd)}")
-        result = subprocess.run(contigs_cmd, text=True, capture_output=True, check=check)
+        regions = self.get_regions()
 
-        regions = []
-        for line in result.stdout.strip().split('\n'):
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split('\t')
-            if len(parts) >= 2:
-                try:
-                    chrom = parts[0]
-                    length = int(parts[1])
-                except ValueError as exc:
-                    print(f"ERROR parsing chrom length from vcf header: {line}")
-                    regions.append(chrom)
-                    continue
-
-                # Create regions of specified size
-                region_size = self.region_size if hasattr(self, 'region_size') else 1000000
-                for start in range(1, length, region_size):
-                    end = min(start + region_size - 1, length)
-                    regions.append(f"{chrom}:{start}-{end}")
 
         if filters is None:
             filters = []
@@ -607,6 +644,10 @@ class SNPSnip:
         except OSError as e:
             logger.debug(f"Failed to remove temporary directory {temp_dir}: {e}")
 
+
+    def get_regions(self):
+        return regions_from_chroms(self.chroms, self.region_size if hasattr(self, 'region_size') else 1000000)
+
     def _create_snp_subset(self):
         """Create a random subset of SNPs passing basic filters."""
         logger.info("Creating SNP subset...")
@@ -624,15 +665,14 @@ class SNPSnip:
 
         filled_vcf = str(self.temp_dir / "subset_filled.vcf.gz")
         commands = [
+           ["bcftools", "+fill-tags", '-Ov', "--", "-t", "all,F_MISSING"],
            ["awk", f'/^#/ {{print; next}} {{if (rand() < {self.subset_freq}) print}}'],
-           ["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING,DP:1=int(sum(FORMAT/DP))"]
         ]
         self.run_bcftools_pipeline(
             input_file=self.vcf_file,
             output_file=filled_vcf,
             pipeline_cmds=commands,
             filters=filters,
-            input_format="-Ov",
         )
 
         self.state["subset_vcf"] = filled_vcf
@@ -1103,11 +1143,11 @@ class SNPSnip:
         self._save_state()
 
 def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="SNPSnip - Interactive VCF filtering tool", prog="snpsnip")
+    parser = argparse.ArgumentParser(description="SNPSnip - An interactive VCF filtering tool", prog="snpsnip")
 
     # Input/output options
     parser.add_argument("--vcf", required=True, help="Input VCF/BCF file (must be indexed)")
+    parser.add_argument("--fai", type=Path, help="An optional fasta index to read contig sizes from, if not available in the VCF header")
     parser.add_argument("--output-dir", default=".", help="Output directory for filtered VCFs")
     parser.add_argument("--state-file", help="State file for checkpointing")
     parser.add_argument("--temp-dir", help="Directory for temporary files")
