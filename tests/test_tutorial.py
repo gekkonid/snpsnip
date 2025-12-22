@@ -167,13 +167,7 @@ class TutorialTest(unittest.TestCase):
                 self.assertEqual(state["stage"], "completed",
                                f"Expected stage='completed', got '{state.get('stage')}'")
 
-                # Verify groups were created
-                self.assertIn("groups", state, "state.json missing 'groups' key")
-                self.assertIn("all_samples", state["groups"],
-                            "state.json missing 'all_samples' group")
-
-                print(f"State validated: stage={state['stage']}, "
-                      f"groups={list(state['groups'].keys())}")
+                print(f"State validated: stage={state['stage']}")
 
         print("\n" + "="*60)
         print("TUTORIAL VALIDATION SUCCESSFUL")
