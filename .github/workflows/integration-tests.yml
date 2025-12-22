@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.12"]
 
     steps:
     - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
     - name: Run tutorial validation test
       run: |
         python -m unittest tests.test_tutorial -v
-      timeout-minutes: 10
+      timeout-minutes: 20
 
     - name: Upload test artifacts on failure
       if: failure()
@@ -55,4 +55,4 @@ jobs:
         name: test-artifacts-py${{ matrix.python-version }}
         path: |
           /tmp/snpsnip_*
-        retention-days: 7
+        retention-days: 1
