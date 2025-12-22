@@ -235,7 +235,7 @@ class SNPSnipIntegrationTest(unittest.TestCase):
         result = self._run_snpsnip(["--next", next_file])
         self.assertEqual(result.returncode, 0, f"Stage 3 should succeed. stderr: {result.stderr}")
 
-        state = self._check_state_file("ready_for_final")
+        state = self._check_state_file("completed")
         self.assertTrue(state.get("completed"), "Processing should be complete")
 
         # Verify output VCF was created
@@ -313,7 +313,7 @@ class SNPSnipIntegrationTest(unittest.TestCase):
         result = self._run_snpsnip(["--next", next_file])
         self.assertEqual(result.returncode, 0)
 
-        state = self._check_state_file("ready_for_final")
+        state = self._check_state_file("completed")
         self.assertTrue(state.get("completed"), "Processing should be complete")
 
         # Verify two output VCFs were created
