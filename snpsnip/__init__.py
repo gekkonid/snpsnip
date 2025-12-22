@@ -197,6 +197,13 @@ class SNPSnip:
             "completed": False,
             "predefined_groups": {}
         }
+        
+        # Load sample list if provided
+        self.sample_list = None
+        self.sample_list_file = None
+        if args.sample_list:
+            self._load_sample_list(args.sample_list)
+
 
         # If next file is provided, load it and update state
         if self.next_file and os.path.exists(self.next_file):
@@ -265,6 +272,48 @@ class SNPSnip:
         """Save current state to state file."""
         with open(self.state_file, 'w') as f:
             json.dump(self.state, f, indent=2)
+
+    def _load_sample_list(self, sample_list_file: str):
+        """Load sample list from a text file and validate against VCF samples."""
+        logger.info(f"Loading sample list from {sample_list_file}")
+        
+        try:
+            with open(sample_list_file, 'r') as f:
+                # Read sample names, one per line, stripping whitespace
+                requested_samples = [line.strip() for line in f if line.strip()]
+            
+            # Get VCF samples
+            vcf_samples = set(self.samples)
+            
+            # Validate and filter samples
+            valid_samples = []
+            invalid_samples = []
+            
+            for sample in requested_samples:
+                if sample in vcf_samples:
+                    valid_samples.append(sample)
+                else:
+                    invalid_samples.append(sample)
+            
+            # Warn about invalid samples
+            if invalid_samples:
+                logger.warning(f"Skipping {len(invalid_samples)} samples not found in VCF:")
+                for sample in invalid_samples[:10]:  # Show first 10
+                    logger.warning(f"  - {sample}")
+                if len(invalid_samples) > 10:
+                    logger.warning(f"  ... and {len(invalid_samples) - 10} more")
+            
+            if not valid_samples:
+                logger.error("No valid samples found in sample list!")
+                raise ValueError("Sample list contains no samples present in the VCF")
+            
+            self.sample_list = valid_samples
+            self.sample_list_file = sample_list_file
+            logger.info(f"Loaded {len(valid_samples)} valid samples from sample list")
+            
+        except Exception as e:
+            logger.error(f"Error loading sample list: {e}")
+            raise
 
     def _load_groups_from_file(self, groups_file: str, group_column: str="group", sample_column: str = "sample"):
         """Load sample groups from a CSV or TSV file."""
@@ -572,7 +621,6 @@ class SNPSnip:
 
         regions = self.get_regions()
 
-
         if filters is None:
             filters = []
         if not regions:
@@ -653,15 +701,24 @@ class SNPSnip:
         logger.info("Creating SNP subset...")
 
         # Create initial filter string
-        filters = []
+        filter_expressions = []
         if self.maf:
-            filters.append(f"MAF>{self.maf}")
+            filter_expressions.append(f"MAF>{self.maf}")
         if self.max_missing:
-            filters.append(f"F_MISSING<{self.max_missing}")
+            filter_expressions.append(f"F_MISSING<{self.max_missing}")
         if self.min_qual:
-            filters.append(f"QUAL>{self.min_qual}")
-        filter_str = " && ".join(filters) if filters else None
+            filter_expressions.append(f"QUAL>{self.min_qual}")
+        filter_str = " && ".join(filter_expressions) if filter_expressions else None
         filters = ["-i", filter_str] if filter_str else []
+        
+        # Add sample list filter if provided
+        if self.sample_list:
+            sample_list_temp = str(self.temp_dir / "sample_list_filter.txt")
+            with open(sample_list_temp, 'w') as f:
+                for sample in self.sample_list:
+                    f.write(f"{sample}\n")
+            filters.extend(["-S", sample_list_temp])
+            logger.info(f"Applying sample list filter with {len(self.sample_list)} samples")
 
         filled_vcf = str(self.temp_dir / "subset_filled.vcf.gz")
         commands = [
@@ -1038,7 +1095,18 @@ class SNPSnip:
             if len(samples) < 1:
                 logger.info(f"Skipping empty group: {group_name}")
                 continue
-            logger.info(f"Processing group: {group_name}")
+            
+            # Intersect with sample list if provided
+            if self.sample_list:
+                original_count = len(samples)
+                samples = [s for s in samples if s in self.sample_list]
+                if len(samples) < original_count:
+                    logger.info(f"Group {group_name}: filtered from {original_count} to {len(samples)} samples using sample list")
+                if len(samples) == 0:
+                    logger.warning(f"Skipping group {group_name}: no samples remain after applying sample list filter")
+                    continue
+            
+            logger.info(f"Processing group: {group_name} with {len(samples)} samples")
 
             # Create a temporary file with sample names
             sample_file = str(self.temp_dir / f"{group_name}_samples.txt")
@@ -1166,6 +1234,7 @@ def main():
     parser.add_argument("--min-qual", type=float, help="Minimum variant quality")
     parser.add_argument("--subset-freq", type=float, default=SUBSET_FREQ,
                        help="Fraction of SNPs to sample for interactive analysis")
+    parser.add_argument("--sample-list", help="Text file with one sample name per line to filter samples")
     parser.add_argument("--groups-file", help="CSV or TSV file with sample and group columns for predefined groups")
     parser.add_argument("--group-column", default="group", help="Column in CSV or TSV file for predefined groups")
     parser.add_argument("--sample-column", default="sample", help="CSV or TSV file for sample")
