@@ -37,6 +37,11 @@ from waitress import serve
 from tqdm import tqdm
 import jinja2
 
+MIN_SUBSET_SNPS = 1000
+try:
+    MIN_SUBSET_SNPS = int(os.environ.get("SNPSNIP_MIN_SUBSET_SNPS", MIN_SUBSET_SNPS))
+except:
+    pass
 
 from ._version import __version__, __version_tuple__
 # Configure logging
@@ -59,7 +64,7 @@ def get_chroms_fai(fai):
                 length = int(parts[1])
                 res[chrom] = length
             except ValueError as exc:
-                print(f"ERROR parsing chrom length from FAI: {line}.")
+                logger.error(f"ERROR parsing chrom length from FAI: {line}")
                 res[chrom] = None
     return res
 
@@ -79,7 +84,7 @@ def get_chroms_vcf(vcf):
                 length = int(parts[1])
                 res[chrom] = length
             except ValueError as exc:
-                print(f"ERROR parsing chrom length from vcf header: {line}. Consider using --fai")
+                logger.error(f"ERROR parsing chrom length from vcf header: {line}. Consider using --fai")
                 res[chrom] = None
     return res
 
@@ -96,7 +101,7 @@ def regions_from_chroms(chroms, region_size=1_000_000):
 
 
 # Standalone function for processing a region (needed for multiprocessing)
-def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True):
+def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True, region_index: int = 0, random_seed: int = 0):
     """
     Process a single genomic region with bcftools.
 
@@ -106,6 +111,11 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
         temp_dir: Directory for temporary output
         pipeline_cmds: List of command lists to run in pipeline
         check: Whether to check return codes
+        filters: Optional filters to apply
+        input_format: Input format for bcftools
+        vcf_out: Whether output is VCF format
+        region_index: Sequential index of this region (for seeding)
+        random_seed: Base random seed
 
     Returns:
         Path to output file or None if processing failed
@@ -116,8 +126,21 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
 
     if filters is None:
         filters = []
+
+    # Seed awk commands with region-specific seed for reproducible random sampling
+    seed = random_seed + region_index
+    modified_pipeline_cmds = []
+    for cmd in pipeline_cmds:
+        if cmd[0] == "awk" and "rand()" in cmd[1]:
+            # Add BEGIN{srand(seed)} to awk commands using rand()
+            awk_script = cmd[1]
+            awk_script_with_seed = f"BEGIN{{srand({seed})}} {awk_script}"
+            modified_pipeline_cmds.append(["awk", awk_script_with_seed])
+        else:
+            modified_pipeline_cmds.append(cmd)
+
     # Construct the command for this region
-    region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + pipeline_cmds
+    region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + modified_pipeline_cmds
     if vcf_out:
         region_cmd.append(
             ["bcftools", "view", "-Ob1", "--write-index", "-o", region_output]
@@ -174,6 +197,7 @@ class SNPSnip:
         self.host = args.host
         self.port = args.port
         self.subset_freq = args.subset_freq
+        self.random_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
 
         # Get list of chromosomes and their lengths
         if self.args.fai:
@@ -197,6 +221,13 @@ class SNPSnip:
             "completed": False,
             "predefined_groups": {}
         }
+        
+        # Load sample list if provided
+        self.sample_list = None
+        self.sample_list_file = None
+        if args.sample_list:
+            self._load_sample_list(args.sample_list)
+
 
         # If next file is provided, load it and update state
         if self.next_file and os.path.exists(self.next_file):
@@ -231,7 +262,7 @@ class SNPSnip:
             ctr = Counter(samples)
             for k, v in ctr.most_common():
                 if v > 1:
-                    print(f"IGNORING duplicated sample in {group}: {k} (seen {v} times)")
+                    logger.warning(f"IGNORING duplicated sample in {group}: {k} (seen {v} times)")
             newgroups[group] = list(set(samples))
         self.state["sample_groups"] =  newgroups
 
@@ -266,6 +297,48 @@ class SNPSnip:
         with open(self.state_file, 'w') as f:
             json.dump(self.state, f, indent=2)
 
+    def _load_sample_list(self, sample_list_file: str):
+        """Load sample list from a text file and validate against VCF samples."""
+        logger.info(f"Loading sample list from {sample_list_file}")
+        
+        try:
+            with open(sample_list_file, 'r') as f:
+                # Read sample names, one per line, stripping whitespace
+                requested_samples = [line.strip() for line in f if line.strip()]
+            
+            # Get VCF samples
+            vcf_samples = set(self.samples)
+            
+            # Validate and filter samples
+            valid_samples = []
+            invalid_samples = []
+            
+            for sample in requested_samples:
+                if sample in vcf_samples:
+                    valid_samples.append(sample)
+                else:
+                    invalid_samples.append(sample)
+            
+            # Warn about invalid samples
+            if invalid_samples:
+                logger.warning(f"Skipping {len(invalid_samples)} samples not found in VCF:")
+                for sample in invalid_samples[:10]:  # Show first 10
+                    logger.warning(f"  - {sample}")
+                if len(invalid_samples) > 10:
+                    logger.warning(f"  ... and {len(invalid_samples) - 10} more")
+            
+            if not valid_samples:
+                logger.error("No valid samples found in sample list!")
+                raise ValueError("Sample list contains no samples present in the VCF")
+            
+            self.sample_list = valid_samples
+            self.sample_list_file = sample_list_file
+            logger.info(f"Loaded {len(valid_samples)} valid samples from sample list")
+            
+        except Exception as e:
+            logger.error(f"Error loading sample list: {e}")
+            raise
+
     def _load_groups_from_file(self, groups_file: str, group_column: str="group", sample_column: str = "sample"):
         """Load sample groups from a CSV or TSV file."""
         logger.info(f"Loading sample groups from {groups_file}")
@@ -292,7 +365,7 @@ class SNPSnip:
                             groups[group] = []
                         groups[group].append(sample)
                     except KeyError as e:
-                        print(f"Strange line: {row}: {str(e)}")
+                        logger.error(f"Strange line: {row}: {str(e)}")
                         raise e
 
             # Store all predefined groups
@@ -572,7 +645,6 @@ class SNPSnip:
 
         regions = self.get_regions()
 
-
         if filters is None:
             filters = []
         if not regions:
@@ -598,8 +670,8 @@ class SNPSnip:
         with ProcessPoolExecutor(max_workers=processes) as executor:
             # Create a list of arguments for each region
             futures = [
-                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf)
-                for region in regions
+                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf, region_index=idx, random_seed=self.random_seed)
+                for idx, region in enumerate(regions)
             ]
 
             # Collect results as they complete
@@ -653,15 +725,24 @@ class SNPSnip:
         logger.info("Creating SNP subset...")
 
         # Create initial filter string
-        filters = []
+        filter_expressions = []
         if self.maf:
-            filters.append(f"MAF>{self.maf}")
+            filter_expressions.append(f"MAF>{self.maf}")
         if self.max_missing:
-            filters.append(f"F_MISSING<{self.max_missing}")
+            filter_expressions.append(f"F_MISSING<{self.max_missing}")
         if self.min_qual:
-            filters.append(f"QUAL>{self.min_qual}")
-        filter_str = " && ".join(filters) if filters else None
+            filter_expressions.append(f"QUAL>{self.min_qual}")
+        filter_str = " && ".join(filter_expressions) if filter_expressions else None
         filters = ["-i", filter_str] if filter_str else []
+        
+        # Add sample list filter if provided
+        if self.sample_list:
+            sample_list_temp = str(self.temp_dir / "sample_list_filter.txt")
+            with open(sample_list_temp, 'w') as f:
+                for sample in self.sample_list:
+                    f.write(f"{sample}\n")
+            filters.extend(["-S", sample_list_temp])
+            logger.info(f"Applying sample list filter: {len(self.sample_list)} samples from {self.sample_list_file}")
 
         filled_vcf = str(self.temp_dir / "subset_filled.vcf.gz")
         commands = [
@@ -676,6 +757,38 @@ class SNPSnip:
         )
 
         self.state["subset_vcf"] = filled_vcf
+
+        # Validate that subset contains enough SNPs
+        logger.info("Validating subset VCF SNP count...")
+        count_cmd = ["bcftools", "index", "--stats", filled_vcf]
+        count_result = subprocess.run(
+            count_cmd, text=True, capture_output=True, check=True
+        )
+
+        # Parse variant counts from index stats (sum across all chromosomes)
+        variant_count = 0
+        for line in count_result.stdout.strip().split('\n'):
+            if line and not line.startswith('#'):
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    try:
+                        variant_count += int(parts[2])
+                    except (ValueError, IndexError):
+                        pass
+
+        # Check minimum SNP count
+        if variant_count < MIN_SUBSET_SNPS:
+            logger.error(f"Subset VCF contains only {variant_count} SNPs (minimum required: {MIN_SUBSET_SNPS})")
+            logger.error(f"Current subset frequency: {self.subset_freq}")
+            logger.error("Suggestions:")
+            logger.error(f"  1. Increase --subset-freq (currently {self.subset_freq})")
+            logger.error("  2. Relax initial filters (--maf, --max-missing, --min-qual)")
+            logger.error("  3. Check that your VCF has enough variants passing filters")
+            if self.sample_list:
+                logger.error("  4. Check that --sample-list contains valid samples")
+            raise SystemExit(1)
+
+        logger.info(f"Subset VCF created with {variant_count} SNPs")
 
     @property
     def samples(self):
@@ -1038,7 +1151,18 @@ class SNPSnip:
             if len(samples) < 1:
                 logger.info(f"Skipping empty group: {group_name}")
                 continue
-            logger.info(f"Processing group: {group_name}")
+            
+            # Intersect with sample list if provided
+            if self.sample_list:
+                original_count = len(samples)
+                samples = [s for s in samples if s in self.sample_list]
+                if len(samples) < original_count:
+                    logger.info(f"Group {group_name}: filtered from {original_count} to {len(samples)} samples using sample list")
+                if len(samples) == 0:
+                    logger.warning(f"Skipping group {group_name}: no samples remain after applying sample list filter")
+                    continue
+            
+            logger.info(f"Processing group: {group_name} with {len(samples)} samples")
 
             # Create a temporary file with sample names
             sample_file = str(self.temp_dir / f"{group_name}_samples.txt")
@@ -1140,6 +1264,7 @@ class SNPSnip:
 
         self.state["output_files"] = output_files
         self.state["completed"] = True
+        self.state["stage"] = "completed"
         self._save_state()
 
 def main():
@@ -1166,6 +1291,7 @@ def main():
     parser.add_argument("--min-qual", type=float, help="Minimum variant quality")
     parser.add_argument("--subset-freq", type=float, default=SUBSET_FREQ,
                        help="Fraction of SNPs to sample for interactive analysis")
+    parser.add_argument("--sample-list", help="Text file with one sample name per line to filter samples")
     parser.add_argument("--groups-file", help="CSV or TSV file with sample and group columns for predefined groups")
     parser.add_argument("--group-column", default="group", help="Column in CSV or TSV file for predefined groups")
     parser.add_argument("--sample-column", default="sample", help="CSV or TSV file for sample")
@@ -1173,6 +1299,7 @@ def main():
                        help="Number of parallel processes to use")
     parser.add_argument("--region-size", type=int, default=1_000_000,
                        help="Size of each parallel region")
+    parser.add_argument("--seed", type=int, help="Random seed for reproducible subset sampling")
 
     args = parser.parse_args()
 
