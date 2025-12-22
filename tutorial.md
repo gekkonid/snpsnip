@@ -58,10 +58,10 @@ verbatim to define subsets of samples.
 
 ## Install
 
-Here, I will install snpsnip in a virtual environment. For production purposes,
-I would recommend using pipx to install a global binary named snpsnp, but have
-the python innards in a separate virtual env to avoid version hell as SNPSnip
-has quite a few dependencies.
+Here, I will install snpsnip in a local virtual environment. For production
+purposes, I would recommend using pipx to install a global binary named snpsnp,
+but have the python innards in a separate virtual env to avoid version hell as
+SNPSnip has quite a few dependencies.
 
 ```bash
 python3 -m venv sspenv
@@ -75,38 +75,32 @@ SNPSnip includes a built-in data generator that creates synthetic VCF files for
 testing and demonstration. This is the easiest way to get started and explore
 SNPSnip's features. Of course, you can substitute this for any standards
 compliant VCF, including your own data. SNPsnip should work with any VCF or BCF
-files, however they *must be indexed*! (just use bcftools index if they aren't
-already)
+files, however they *must be indexed* (just use bcftools index if they aren't
+already), and ideally contain contig sizes in the header. If you supply a VCF
+that we can't work with, the error message should tell you how to solve the
+problem (e.g. by indexing the VCF, or supplying the fasta index of the
+reference sequences). If you don't find the error message sufficiently helpful,
+then your file is incompatible in some novel way, please contact me or raise an
+issue on github.
 
-Generate a test dataset with 50 samples and 1M SNPs:
+
+Generate a test dataset with 50 samples and 1M SNPs, including example filter
+files:
 
 ```bash
-snpsnip-generate-example -o example.vcf.gz -n 50 -m 1000000
+snpsnip-generate-example -o example.vcf.gz -n 50 -m 1000000 --with-filters
 ```
 
-This will create `example.vcf.gz` and `example.vcf.gz.csi` (index file) with:
-- 50 samples named `sample_01`, `sample_02`, etc.
-- 1000000 SNPs distributed across 2 chromosomes
-- Realistic allele frequencies (uniformly distributed 0.01-0.99) and missing data
+This will create:
+- `example.vcf.gz` and `example.vcf.gz.csi` (VCF and index)
+- Two example filter files. (You will normally generate these files by loading
+  a Web UI, making your selections, and saving the file from your browser. They
+  are generated here for convenience and testing.
+    - `snpsnip_sample_filters.json`
+    - `snpsnip_variant_filters.json`
 
-You can customize the generated data using additional options. See `snpsnip-generate-example --help`.
-
-## Online mode
-
-Online mode launches an interactive web interface on your local machine:
-
-```
-snpsnip --vcf example.vcf.gz --output-dir example_online --maf 0.01
-```
-
-This will:
-1. Process the VCF file
-2. Calculate sample statistics and PCA
-3. Launch a web browser for interactive filtering
-4. Generate filtered VCF files based on your selections
-
-The web interface allows you to interactively explore sample PCA, set filtering
-thresholds, and define sample groups all in one session.
+If you want, you can customize the generated data using additional options. See
+`snpsnip-generate-example --help`.
 
 ## Offline mode
 
@@ -114,31 +108,38 @@ Offline mode is ideal for remote servers or HPC environments where you can't run
 a web browser. It generates static HTML files that you can download and view
 locally.
 
+If you generated example data with `--with-filters`, you can skip the
+interactive HTML steps, and supply the JSON files made by the example data
+generator in the steps below. For a more practical walk-through, open the HTML,
+play with the data, and export your selections as you would for your own data,
+saving and using the JSON files that the web UI generates.
+
 ### Step 1: Calculate sample statistics and PCA
 
 ```bash
 snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --maf 0.01
 ```
 
-This generates a static HTML file (`snpsnip_sample_filters.html`) you can
-download and open in your browser to set sample filtering thresholds and define
-sample groups. Save your selections as a JSON file.
+This generates a static HTML file (`example_offline/snpsnip_sample_filters.html`)
+you can copy to your local machine and open in your browser to set sample
+filtering thresholds and define sample groups. Save your selections as a JSON
+file.
 
 ### Step 2: Calculate variant statistics per group
 
-Copy the JSON file back to your server, then:
+Copy the resulting JSON file back to wherever you are running SNPSnip, then:
 
 ```bash
 snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --next snpsnip_sample_filters.json
 ```
 
 This calculates SNP statistics for each sample group and generates another HTML
-file (`snpsnip_variant_filters.html`) for setting variant filtering thresholds.
-Save your selections as a JSON file.
+file (`example_offline/snpsnip_variant_filters.html`) for setting variant
+filtering thresholds. Save your selections as a JSON file.
 
 ### Step 3: Generate final filtered VCFs
 
-Copy the JSON file back to your server, then:
+Copy the JSON file back to wherever you're running SNPSnip, then:
 
 ```bash
 snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --next snpsnip_variant_filters.json
@@ -146,6 +147,23 @@ snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --next snpsn
 
 This generates the final filtered VCF files for each sample group based on your
 threshold selections.
+
+
+## Online mode
+
+Alternatively, SNPSnip has an online mode that launches an interactive web
+interface on your local machine:
+
+```
+snpsnip --vcf example.vcf.gz --output-dir example_online --maf 0.01
+```
+
+This will do all of the steps above. The web interface allows you to
+interactively explore sample PCA, set filtering thresholds, and define sample
+groups all in one session, with VCF processing happening automatically when you
+click buttons in your browser. The obvious limitation here is that your web
+browser, your raw VCF, and a reasonably beefy CPU must be on the same machine,
+which is not typically the case with large datasets.
 
 
 # All arguments

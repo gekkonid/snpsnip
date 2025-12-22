@@ -10,6 +10,7 @@ Creates synthetic VCF files with:
 """
 
 import argparse
+import json
 import logging
 import numpy as np
 import os
@@ -27,7 +28,8 @@ def generate_example_vcf(
     missing_prop=0.05,
     n_chroms=2,
     compress=True,
-    random_seed=None
+    random_seed=None,
+    with_filters=False
 ):
     """
     Generate an example VCF file with synthetic data
@@ -49,6 +51,8 @@ def generate_example_vcf(
         Whether to compress and index the VCF with bcftools
     random_seed : int, optional
         Random seed for reproducibility
+    with_filters : bool, default=False
+        Whether to generate example filter JSON files for offline workflow
 
     Returns
     -------
@@ -250,7 +254,59 @@ def generate_example_vcf(
         final_path = compressed_path
 
     logger.info(f"Example VCF created: {final_path}")
+
+    # Generate filter JSON files if requested
+    if with_filters:
+        _generate_filter_jsons(final_path, samples)
+
     return str(final_path)
+
+
+def _generate_filter_jsons(vcf_path, samples):
+    """
+    Generate example filter JSON files for offline workflow
+
+    Parameters
+    ----------
+    vcf_path : Path
+        Path to the generated VCF file
+    samples : list
+        List of sample names
+    """
+    output_dir = Path(vcf_path).parent
+
+    # Sample filters: keep all samples in one group
+    sample_filters = {
+        "groups": {
+            "all_samples": samples
+        },
+        "removed_samples": []
+    }
+
+    sample_filters_path = output_dir / "snpsnip_sample_filters.json"
+    logger.info(f"Writing sample filters to {sample_filters_path}")
+    with open(sample_filters_path, 'w') as f:
+        json.dump(sample_filters, f, indent=2)
+
+    # Variant filters: basic sensible thresholds
+    variant_filters = {
+        "groups": {
+            "all_samples": {
+                "maf_min": 0.01,
+                "missing_max": 0.2,
+                "qual_min": 30.0
+            }
+        }
+    }
+
+    variant_filters_path = output_dir / "snpsnip_variant_filters.json"
+    logger.info(f"Writing variant filters to {variant_filters_path}")
+    with open(variant_filters_path, 'w') as f:
+        json.dump(variant_filters, f, indent=2)
+
+    logger.info("Generated filter JSON files for offline workflow:")
+    logger.info(f"  - {sample_filters_path}")
+    logger.info(f"  - {variant_filters_path}")
 
 
 def main():
@@ -318,6 +374,11 @@ Examples:
         action='store_true',
         help='Verbose output'
     )
+    parser.add_argument(
+        '--with-filters',
+        action='store_true',
+        help='Generate example filter JSON files for offline workflow'
+    )
 
     args = parser.parse_args()
 
@@ -349,10 +410,13 @@ Examples:
             missing_prop=args.missing,
             n_chroms=args.chroms,
             compress=not args.no_compress,
-            random_seed=args.seed
+            random_seed=args.seed,
+            with_filters=args.with_filters
         )
 
         print(f"Successfully generated example VCF: {vcf_path}")
+        if args.with_filters:
+            print("Generated filter JSON files for offline workflow")
         return 0
 
     except Exception as e:

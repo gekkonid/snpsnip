@@ -6,6 +6,7 @@ This test validates that the tutorial documentation works by running all bash
 code blocks in sequence, simulating a user following the tutorial.
 """
 
+import json
 import os
 import re
 import shutil
@@ -123,12 +124,54 @@ class TutorialTest(unittest.TestCase):
         expected_files = [
             "example.vcf.gz",
             "example.vcf.gz.csi",
+            "snpsnip_sample_filters.json",
+            "snpsnip_variant_filters.json",
         ]
 
         for filename in expected_files:
             filepath = os.path.join(self.test_dir, filename)
             self.assertTrue(os.path.exists(filepath),
                           f"Expected file not created: {filename}")
+
+        # Verify offline mode outputs
+        offline_dir = os.path.join(self.test_dir, "example_offline")
+        if os.path.exists(offline_dir):
+            # Check final VCF was created
+            final_vcf = os.path.join(offline_dir, "all_samples.vcf.gz")
+            self.assertTrue(os.path.exists(final_vcf),
+                          f"Final filtered VCF not created: {final_vcf}")
+            self.assertTrue(os.path.exists(final_vcf + ".csi"),
+                          f"Final filtered VCF index not created: {final_vcf}.csi")
+
+            # Verify final VCF has variants
+            count_result = subprocess.run(
+                ["bcftools", "view", "-H", final_vcf],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            variant_count = len([l for l in count_result.stdout.strip().split('\n') if l])
+            self.assertGreater(variant_count, 0, "Final VCF has no variants")
+            print(f"Final VCF created with {variant_count} variants")
+
+            # Check state.json exists and has expected structure
+            state_file = os.path.join(offline_dir, "state.json")
+            if os.path.exists(state_file):
+                with open(state_file, 'r') as f:
+                    state = json.load(f)
+
+                # Verify state has expected keys
+                self.assertIn("stage", state, "state.json missing 'stage' key")
+                self.assertEqual(state["stage"], "complete",
+                               f"Expected stage='complete', got '{state.get('stage')}'")
+
+                # Verify groups were created
+                self.assertIn("groups", state, "state.json missing 'groups' key")
+                self.assertIn("all_samples", state["groups"],
+                            "state.json missing 'all_samples' group")
+
+                print(f"State validated: stage={state['stage']}, "
+                      f"groups={list(state['groups'].keys())}")
 
         print("\n" + "="*60)
         print("TUTORIAL VALIDATION SUCCESSFUL")
