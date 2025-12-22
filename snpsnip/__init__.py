@@ -59,7 +59,7 @@ def get_chroms_fai(fai):
                 length = int(parts[1])
                 res[chrom] = length
             except ValueError as exc:
-                print(f"ERROR parsing chrom length from FAI: {line}.")
+                logger.error(f"ERROR parsing chrom length from FAI: {line}")
                 res[chrom] = None
     return res
 
@@ -79,7 +79,7 @@ def get_chroms_vcf(vcf):
                 length = int(parts[1])
                 res[chrom] = length
             except ValueError as exc:
-                print(f"ERROR parsing chrom length from vcf header: {line}. Consider using --fai")
+                logger.error(f"ERROR parsing chrom length from vcf header: {line}. Consider using --fai")
                 res[chrom] = None
     return res
 
@@ -238,7 +238,7 @@ class SNPSnip:
             ctr = Counter(samples)
             for k, v in ctr.most_common():
                 if v > 1:
-                    print(f"IGNORING duplicated sample in {group}: {k} (seen {v} times)")
+                    logger.warning(f"IGNORING duplicated sample in {group}: {k} (seen {v} times)")
             newgroups[group] = list(set(samples))
         self.state["sample_groups"] =  newgroups
 
@@ -341,7 +341,7 @@ class SNPSnip:
                             groups[group] = []
                         groups[group].append(sample)
                     except KeyError as e:
-                        print(f"Strange line: {row}: {str(e)}")
+                        logger.error(f"Strange line: {row}: {str(e)}")
                         raise e
 
             # Store all predefined groups
@@ -718,7 +718,7 @@ class SNPSnip:
                 for sample in self.sample_list:
                     f.write(f"{sample}\n")
             filters.extend(["-S", sample_list_temp])
-            logger.info(f"Applying sample list filter with {len(self.sample_list)} samples")
+            logger.info(f"Applying sample list filter: {len(self.sample_list)} samples from {self.sample_list_file}")
 
         filled_vcf = str(self.temp_dir / "subset_filled.vcf.gz")
         commands = [
@@ -733,6 +733,39 @@ class SNPSnip:
         )
 
         self.state["subset_vcf"] = filled_vcf
+
+        # Validate that subset contains enough SNPs
+        logger.info("Validating subset VCF SNP count...")
+        count_cmd = ["bcftools", "index", "--stats", filled_vcf]
+        count_result = subprocess.run(
+            count_cmd, text=True, capture_output=True, check=True
+        )
+
+        # Parse variant counts from index stats (sum across all chromosomes)
+        variant_count = 0
+        for line in count_result.stdout.strip().split('\n'):
+            if line and not line.startswith('#'):
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    try:
+                        variant_count += int(parts[2])
+                    except (ValueError, IndexError):
+                        pass
+
+        # Check minimum SNP count
+        MIN_SUBSET_SNPS = 5000
+        if variant_count < MIN_SUBSET_SNPS:
+            logger.error(f"Subset VCF contains only {variant_count} SNPs (minimum required: {MIN_SUBSET_SNPS})")
+            logger.error(f"Current subset frequency: {self.subset_freq}")
+            logger.error("Suggestions:")
+            logger.error(f"  1. Increase --subset-freq (currently {self.subset_freq})")
+            logger.error("  2. Relax initial filters (--maf, --max-missing, --min-qual)")
+            logger.error("  3. Check that your VCF has enough variants passing filters")
+            if self.sample_list:
+                logger.error("  4. Check that --sample-list contains valid samples")
+            raise SystemExit(1)
+
+        logger.info(f"Subset VCF created with {variant_count} SNPs")
 
     @property
     def samples(self):
