@@ -101,7 +101,7 @@ def regions_from_chroms(chroms, region_size=1_000_000):
 
 
 # Standalone function for processing a region (needed for multiprocessing)
-def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True):
+def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True, region_index: int = 0, random_seed: int = 0):
     """
     Process a single genomic region with bcftools.
 
@@ -111,6 +111,11 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
         temp_dir: Directory for temporary output
         pipeline_cmds: List of command lists to run in pipeline
         check: Whether to check return codes
+        filters: Optional filters to apply
+        input_format: Input format for bcftools
+        vcf_out: Whether output is VCF format
+        region_index: Sequential index of this region (for seeding)
+        random_seed: Base random seed
 
     Returns:
         Path to output file or None if processing failed
@@ -121,8 +126,21 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
 
     if filters is None:
         filters = []
+
+    # Seed awk commands with region-specific seed for reproducible random sampling
+    seed = random_seed + region_index
+    modified_pipeline_cmds = []
+    for cmd in pipeline_cmds:
+        if cmd[0] == "awk" and "rand()" in cmd[1]:
+            # Add BEGIN{srand(seed)} to awk commands using rand()
+            awk_script = cmd[1]
+            awk_script_with_seed = f"BEGIN{{srand({seed})}} {awk_script}"
+            modified_pipeline_cmds.append(["awk", awk_script_with_seed])
+        else:
+            modified_pipeline_cmds.append(cmd)
+
     # Construct the command for this region
-    region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + pipeline_cmds
+    region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + modified_pipeline_cmds
     if vcf_out:
         region_cmd.append(
             ["bcftools", "view", "-Ob1", "--write-index", "-o", region_output]
@@ -179,6 +197,7 @@ class SNPSnip:
         self.host = args.host
         self.port = args.port
         self.subset_freq = args.subset_freq
+        self.random_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
 
         # Get list of chromosomes and their lengths
         if self.args.fai:
@@ -651,8 +670,8 @@ class SNPSnip:
         with ProcessPoolExecutor(max_workers=processes) as executor:
             # Create a list of arguments for each region
             futures = [
-                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf)
-                for region in regions
+                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf, region_index=idx, random_seed=self.random_seed)
+                for idx, region in enumerate(regions)
             ]
 
             # Collect results as they complete
@@ -1279,6 +1298,7 @@ def main():
                        help="Number of parallel processes to use")
     parser.add_argument("--region-size", type=int, default=1_000_000,
                        help="Size of each parallel region")
+    parser.add_argument("--seed", type=int, help="Random seed for reproducible subset sampling")
 
     args = parser.parse_args()
 
