@@ -62,8 +62,6 @@ class SNPSnipIntegrationTest(unittest.TestCase):
             compress=True,
             random_seed=42  # Reproducible tests
         )
-        # FIXME
-        shutil.copyfile(cls.test_vcf, "test.vcf.gz")
 
     def setUp(self):
         """Set up test output directory for each test"""
