@@ -161,9 +161,11 @@ class TutorialTest(unittest.TestCase):
                     state = json.load(f)
 
                 # Verify state has expected keys
+                self.assertTrue(state.get("complete", False),
+                               f"Expected state complete=True, got '{state.get('complete')}'")
                 self.assertIn("stage", state, "state.json missing 'stage' key")
-                self.assertEqual(state["stage"], "complete",
-                               f"Expected stage='complete', got '{state.get('stage')}'")
+                self.assertEqual(state["stage"], "completed",
+                               f"Expected stage='completed', got '{state.get('stage')}'")
 
                 # Verify groups were created
                 self.assertIn("groups", state, "state.json missing 'groups' key")
