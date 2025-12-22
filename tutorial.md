@@ -1,15 +1,15 @@
 # SNPSnip
 
-In this tutorial, we will filter a tiny SNP set from the 1001 Genomes project
-(*A. thaliana*). SNPSnip is designed for the interactive filtering and
-subsetting of massive raw SNP call datasets. It supports two modes of
-operation, an "online" mode, which is somewhat simpler to use, however is only
-usable on machines with a screen (e.g. your laptop), and therefore isn't
-particularly useful for large datasets. To get around this, there is also an
-"offline" mode, which requires slightly more manual work, however requires only
-that you can copy files from/to a machine with a web browser, and therefore is
-great for use on remote HPC servers, or even as batch jobs on a compute
-cluster.
+In this tutorial, we will use SNPSnip's built-in example data generator to
+create a synthetic VCF file and demonstrate the filtering workflow. SNPSnip is
+designed for the interactive filtering and subsetting of massive raw SNP call
+datasets. It supports two modes of operation, an "online" mode, which is
+somewhat simpler to use, however is only usable on machines with a screen (e.g.
+your laptop), and therefore isn't particularly useful for large datasets. To
+get around this, there is also an "offline" mode, which requires slightly more
+manual work, however requires only that you can copy files from/to a machine
+with a web browser, and therefore is great for use on remote HPC servers, or
+even as batch jobs on a compute cluster.
 
 A note on filtering philosophy: each downstream analysis will tolerate
 a different balance of SNP count, missing data, and sample population
@@ -56,67 +56,96 @@ verbatim to define subsets of samples.
 # Tutorial
 
 
-## Obtain data
-
-First we obtain a filtered subset of the 1001g data, which is only about 10MB.
-Please feel free to substitute this for any standards compliant VCF, including
-your own data. SNPsnip should work with any VCF or BCF files, however they
-*must be indexed*! (just use bcftools index if they aren't already)
-
-```
-wget -O ath_filt-MAC5-MISS20.vcf.gz 'https://zenodo.org/records/16880445/files/ath_filt-MAC5-MISS20.vcf.gz?download=1'
-wget -O ath_filt-MAC5-MISS20.vcf.gz.csi 'https://zenodo.org/records/16880445/files/ath_filt-MAC5-MISS20.vcf.gz.csi?download=1'
-```
-
-### Install
+## Install
 
 Here, I will install snpsnip in a virtual environment. For production purposes,
 I would recommend using pipx to install a global binary named snpsnp, but have
 the python innards in a separate virtual env to avoid version hell as SNPSnip
 has quite a few dependencies.
 
-
-```
+```bash
 python3 -m venv sspenv
 source sspenv/bin/activate
-pip install -e .
+python3 -m pip install -e .
 ```
 
+## Generate example data
 
-### Online mode
+SNPSnip includes a built-in data generator that creates synthetic VCF files for
+testing and demonstration. This is the easiest way to get started and explore
+SNPSnip's features. Of course, you can substitute this for any standards
+compliant VCF, including your own data. SNPsnip should work with any VCF or BCF
+files, however they *must be indexed*! (just use bcftools index if they aren't
+already)
 
+Generate a test dataset with 50 samples and 1M SNPs:
 
-```
-snpsnip --vcf ath_filt-MAC5-MISS20_ctg.vcf.gz --output-dir ath_online --region-size 100000000 --maf 0.001
-```
-
-
-### Offline mode
-
-First, make a subset and calcuate PCA & Sample stats
-
-```
-snpsnip --vcf input.vcf.gz --offline
+```bash
+snpsnip-generate-example -o example.vcf.gz -n 50 -m 1000000
 ```
 
-This generates a static HTML file you can download & play with to set your
-thresholds. Then, you save a .json file to your PC and then copy that file
-back to wherever you're running SNPsnip, then:
+This will create `example.vcf.gz` and `example.vcf.gz.csi` (index file) with:
+- 50 samples named `sample_01`, `sample_02`, etc.
+- 1000000 SNPs distributed across 2 chromosomes
+- Realistic allele frequencies (uniformly distributed 0.01-0.99) and missing data
+
+You can customize the generated data using additional options. See `snpsnip-generate-example --help`.
+
+## Online mode
+
+Online mode launches an interactive web interface on your local machine:
 
 ```
-snpsnip --vcf input.vcf.gz --offline --next snpsnip_sample_filters.json
+snpsnip --vcf example.vcf.gz --output-dir example_online --maf 0.01
 ```
 
-This makes the subsets, and calculates the SNP stats for each group of
-samples you selected. This again generates a static HTML file you can use to
-interactively make your SNP filtering threshold selections. Again save the
-output, copy it back to where you're running SNPsnip, then:
+This will:
+1. Process the VCF file
+2. Calculate sample statistics and PCA
+3. Launch a web browser for interactive filtering
+4. Generate filtered VCF files based on your selections
 
-```
-snpsnip --vcf input.vcf.gz --offline --next snpsnip_variant_filters.json
+The web interface allows you to interactively explore sample PCA, set filtering
+thresholds, and define sample groups all in one session.
+
+## Offline mode
+
+Offline mode is ideal for remote servers or HPC environments where you can't run
+a web browser. It generates static HTML files that you can download and view
+locally.
+
+### Step 1: Calculate sample statistics and PCA
+
+```bash
+snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --maf 0.01
 ```
 
-This will generate the final files.
+This generates a static HTML file (`snpsnip_sample_filters.html`) you can
+download and open in your browser to set sample filtering thresholds and define
+sample groups. Save your selections as a JSON file.
+
+### Step 2: Calculate variant statistics per group
+
+Copy the JSON file back to your server, then:
+
+```bash
+snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --next snpsnip_sample_filters.json
+```
+
+This calculates SNP statistics for each sample group and generates another HTML
+file (`snpsnip_variant_filters.html`) for setting variant filtering thresholds.
+Save your selections as a JSON file.
+
+### Step 3: Generate final filtered VCFs
+
+Copy the JSON file back to your server, then:
+
+```bash
+snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --next snpsnip_variant_filters.json
+```
+
+This generates the final filtered VCF files for each sample group based on your
+threshold selections.
 
 
 # All arguments

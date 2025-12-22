@@ -57,7 +57,7 @@ def generate_example_vcf(
 
     Notes
     -----
-    - Allele frequencies are uniformly distributed between 0.1 and 0.9
+    - Allele frequencies are uniformly distributed between 1%-99%
     - Quality scores vary between 30 and 90
     - Read depth varies between 10 and 200
     - Missing data follows exponential distribution (some samples have more missing data)
@@ -157,8 +157,8 @@ def generate_example_vcf(
             # Random quality (30-90)
             qual = int(np.random.uniform(30, 90))
 
-            # Random allele frequency (uniform 0.1 to 0.9)
-            af = np.random.uniform(0.1, 0.9)
+            # Random allele frequency 
+            af = np.random.uniform(0, 1)
 
             # Random total depth (50-200)
             total_dp = int(np.random.uniform(50, 200))
