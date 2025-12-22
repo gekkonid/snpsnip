@@ -1264,6 +1264,7 @@ class SNPSnip:
 
         self.state["output_files"] = output_files
         self.state["completed"] = True
+        self.state["stage"] = "completed"
         self._save_state()
 
 def main():

@@ -137,7 +137,7 @@ class TutorialTest(unittest.TestCase):
         offline_dir = os.path.join(self.test_dir, "example_offline")
         if os.path.exists(offline_dir):
             # Check final VCF was created
-            final_vcf = os.path.join(offline_dir, "all_samples.vcf.gz")
+            final_vcf = os.path.join(offline_dir, "all_samples_filtered.vcf.gz")
             self.assertTrue(os.path.exists(final_vcf),
                           f"Final filtered VCF not created: {final_vcf}")
             self.assertTrue(os.path.exists(final_vcf + ".csi"),
