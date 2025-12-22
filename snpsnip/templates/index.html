@@ -457,7 +457,9 @@
                             qual: { min: null, max: null },
                             depth: { min: null, max: null },
                             af: { min: null, max: null },
-                            missing: { min: null, max: null }
+                            missing: { min: null, max: null },
+                            exhet: { min: null, max: null },
+                            ac: { min: null, max: null }
                         };
                     }
                     
@@ -640,7 +642,8 @@
                     depth: { min: null, max: null },
                     af: { min: null, max: null },
                     missing: { min: null, max: null },
-                    exhet: { min: null, max: null }
+                    exhet: { min: null, max: null },
+                    ac: { min: null, max: null }
                 };
             }
             
@@ -1654,10 +1657,20 @@
                 const groupDiv = document.createElement('div');
                 groupDiv.className = 'group-container mb-4';
                 
+                const headerDiv = document.createElement('div');
+                headerDiv.className = 'd-flex justify-content-between align-items-center mb-3';
+                
                 const header = document.createElement('h3');
                 header.textContent = `Group: ${groupName}`;
+                headerDiv.appendChild(header);
                 
-                groupDiv.appendChild(header);
+                const copyButton = document.createElement('button');
+                copyButton.className = 'btn btn-outline-primary';
+                copyButton.textContent = 'Copy filters to all groups';
+                copyButton.onclick = () => copyFiltersToAllGroups(groupName);
+                headerDiv.appendChild(copyButton);
+                
+                groupDiv.appendChild(headerDiv);
                 
                 // Create metric cards
                 const metricsRow = document.createElement('div');
@@ -1731,6 +1744,20 @@
                         }
                     );
                     metricsRow.appendChild(exhetDiv);
+                }
+                
+                // Allele Count
+                if (groupStats.ac) {
+                    const acDiv = createMetricCard(
+                        'Allele Count',
+                        groupStats.ac,
+                        `${groupName}-ac`,
+                        (min, max) => {
+                            state.variantThresholds[groupName].ac.min = min;
+                            state.variantThresholds[groupName].ac.max = max;
+                        }
+                    );
+                    metricsRow.appendChild(acDiv);
                 }
                 
                 groupDiv.appendChild(metricsRow);
@@ -1913,6 +1940,52 @@
             } else {
                 maxLine.style('display', 'none');
             }
+        }
+        
+        // Copy filters from one group to all other groups
+        function copyFiltersToAllGroups(sourceGroupName) {
+            if (!confirm(`Copy all filter settings from "${sourceGroupName}" to all other groups?`)) {
+                return;
+            }
+            
+            const sourceFilters = state.variantThresholds[sourceGroupName];
+            if (!sourceFilters) return;
+            
+            // For each group
+            for (const groupName in state.sampleGroups) {
+                if (groupName === sourceGroupName) continue;
+                
+                // Copy all filter settings
+                for (const filterType in sourceFilters) {
+                    state.variantThresholds[groupName][filterType] = {
+                        min: sourceFilters[filterType].min,
+                        max: sourceFilters[filterType].max
+                    };
+                    
+                    // Update input fields
+                    const minInput = document.getElementById(`${groupName}-${filterType}-min`);
+                    const maxInput = document.getElementById(`${groupName}-${filterType}-max`);
+                    
+                    if (minInput) {
+                        minInput.value = sourceFilters[filterType].min !== null ? 
+                            sourceFilters[filterType].min : '';
+                    }
+                    
+                    if (maxInput) {
+                        maxInput.value = sourceFilters[filterType].max !== null ? 
+                            sourceFilters[filterType].max : '';
+                    }
+                    
+                    // Update threshold lines
+                    updateThresholdLines(
+                        `${groupName}-${filterType}`, 
+                        sourceFilters[filterType].min, 
+                        sourceFilters[filterType].max
+                    );
+                }
+            }
+            
+            alert('Filter settings copied to all groups.');
         }
         
         // Submit variant filters

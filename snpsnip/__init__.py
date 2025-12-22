@@ -863,6 +863,16 @@ class SNPSnip:
                 merge_cmd=["cat"],
                 check=False
             )
+            
+            # Allele Count
+            ac_file = str(self.temp_dir / f"{group_name}_ac.txt")
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=ac_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AC\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
 
             # Parse statistics files
             try:
@@ -918,6 +928,27 @@ class SNPSnip:
                         except ValueError:
                             pass
                 stats["exhet"] = self._compute_histogram(exhet_values)
+                
+                # Allele Count
+                ac_values = []
+                with open(ac_file, 'r') as f:
+                    for line in f:
+                        try:
+                            value = float(line.strip())
+                            ac_values.append(value)
+                        except ValueError:
+                            pass
+                stats["ac"] = self._compute_histogram(ac_values)
+                
+                # Adjust depth to be per-sample
+                # This is probably a bad idea but I am keeping it around in case I change my mind
+                #if "depth" in stats and len(samples) > 0:
+                #    # Create a copy of the depth histogram
+                #    depth_per_sample = {
+                #        "bins": [bin_val / len(samples) for bin_val in stats["depth"]["bins"]],
+                #        "counts": stats["depth"]["counts"].copy()
+                #    }
+                #    stats["depth"] = depth_per_sample
 
                 self.state["variant_stats"][group_name] = stats
 
@@ -1022,6 +1053,11 @@ class SNPSnip:
                     # Convert from -log10 scale back to p-value
                     p_value = 10 ** (-max_exhet)
                     filter_expressions.append(f"INFO/ExcHet>={p_value}")
+                    
+            if "ac" in group_filters:
+                min_ac = group_filters["ac"].get("min")
+                if min_ac is not None:
+                    filter_expressions.append(f"INFO/AC>={min_ac}")
 
             # Add initial filters
             if self.maf:
