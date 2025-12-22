@@ -37,6 +37,11 @@ from waitress import serve
 from tqdm import tqdm
 import jinja2
 
+MIN_SUBSET_SNPS = 1000
+try:
+    MIN_SUBSET_SNPS = int(os.environ.get("SNPSNIP_MIN_SUBSET_SNPS", MIN_SUBSET_SNPS))
+except:
+    pass
 
 from ._version import __version__, __version_tuple__
 # Configure logging
@@ -753,7 +758,6 @@ class SNPSnip:
                         pass
 
         # Check minimum SNP count
-        MIN_SUBSET_SNPS = 5000
         if variant_count < MIN_SUBSET_SNPS:
             logger.error(f"Subset VCF contains only {variant_count} SNPs (minimum required: {MIN_SUBSET_SNPS})")
             logger.error(f"Current subset frequency: {self.subset_freq}")

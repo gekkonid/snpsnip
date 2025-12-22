@@ -19,6 +19,10 @@ import sys
 import unittest
 from pathlib import Path
 
+# Import the VCF generator
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from snpsnip.generate_example import generate_example_vcf
+
 
 class SNPSnipIntegrationTest(unittest.TestCase):
     """Integration tests for SNPSnip in offline mode"""
@@ -49,63 +53,15 @@ class SNPSnipIntegrationTest(unittest.TestCase):
     @classmethod
     def _create_test_vcf(cls):
         """Create a test VCF file with 10,000 variants and 20 samples"""
-        vcf_content = """##fileformat=VCFv4.2
-##FILTER=<ID=PASS,Description="All filters passed">
-##contig=<ID=chr1,length=10000000>
-##contig=<ID=chr2,length=10000000>
-##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
-##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"""
-
-        # Add 20 sample names
-        samples = [f"sample_{i:02d}" for i in range(1, 21)]
-        vcf_content += "\t" + "\t".join(samples) + "\n"
-
-        # Generate 10,000 variants (5,000 per chromosome)
-        variant_lines = []
-        for chrom in ["chr1", "chr2"]:
-            for i in range(5000):
-                pos = (i + 1) * 1000
-                variant_id = f"{chrom}_{pos}"
-                qual = 30 + (i % 50)  # Quality varies from 30-80
-                dp = 100 + (i % 100)  # Depth varies from 100-200
-                af = 0.1 + (i % 40) / 100  # AF varies from 0.1 to 0.5
-
-                # Generate genotypes with varying patterns
-                genotypes = []
-                for j in range(20):
-                    # Create some variation in genotypes
-                    if (i + j) % 7 == 0:
-                        gt = "0/0"  # Homozygous reference
-                    elif (i + j) % 5 == 0:
-                        gt = "1/1"  # Homozygous alternate
-                    elif (i + j) % 11 == 0:
-                        gt = "./."  # Missing
-                    else:
-                        gt = "0/1"  # Heterozygous
-
-                    sample_dp = 10 + ((i + j) % 30)
-                    genotypes.append(f"{gt}:{sample_dp}")
-
-                line = f"{chrom}\t{pos}\t{variant_id}\tA\tT\t{qual}\tPASS\tDP={dp};AF={af:.3f}\tGT:DP\t"
-                line += "\t".join(genotypes)
-                variant_lines.append(line)
-
-        vcf_content += "\n".join(variant_lines)
-
-        # Write uncompressed VCF first
-        uncompressed_vcf = cls.test_vcf.replace(".gz", "")
-        with open(uncompressed_vcf, 'w') as f:
-            f.write(vcf_content)
-
-        # Compress and index with bcftools
-        subprocess.run(["bcftools", "view", "-Oz", "-o", cls.test_vcf, uncompressed_vcf], check=True)
-        subprocess.run(["bcftools", "index", "-f", cls.test_vcf], check=True)
-
-        # Clean up uncompressed file
-        os.remove(uncompressed_vcf)
+        generate_example_vcf(
+            output_path=cls.test_vcf,
+            n_samples=20,
+            n_snps=10000,
+            missing_prop=0.05,
+            n_chroms=2,
+            compress=True,
+            random_seed=42  # Reproducible tests
+        )
 
     def setUp(self):
         """Set up test output directory for each test"""
@@ -179,16 +135,17 @@ class SNPSnipIntegrationTest(unittest.TestCase):
             int(line.split('\t')[2]) for line in count_result.stdout.strip().split('\n')
             if line and not line.startswith('#') and len(line.split('\t')) >= 3
         )
-        self.assertGreaterEqual(variant_count, 5000, "Subset should have at least 5000 SNPs")
+        self.assertLessEqual(abs(5000-variant_count), 100, "Subset should have about 5000 SNPs")
         print(f"Test 1: Subset VCF created with {variant_count} SNPs")
 
     def test_02_initial_processing_with_sample_list(self):
         """Test initial processing with sample list"""
         # Create sample list with 10 valid samples and 2 invalid ones
         sample_list_file = os.path.join(self.output_dir, "samples.txt")
+        samples_keep = [f"sample_{i:02d}" for i in range(1, 11)]
         with open(sample_list_file, 'w') as f:
-            for i in range(1, 11):
-                f.write(f"sample_{i:02d}\n")
+            for s in samples_keep:
+                f.write(f"{s}\n")
             f.write("invalid_sample_1\n")
             f.write("invalid_sample_2\n")
 
@@ -210,7 +167,7 @@ class SNPSnipIntegrationTest(unittest.TestCase):
             capture_output=True, text=True, check=True
         )
         subset_samples = samples_result.stdout.strip().split('\n')
-        self.assertEqual(len(subset_samples), 10, "Should have 10 samples in subset")
+        self.assertEqual(set(subset_samples), set(samples_keep), "Should have kept only valid subset samples")
 
         print(f"Test 2: Sample list filtering works correctly ({len(subset_samples)} samples)")
 
@@ -387,7 +344,7 @@ class SNPSnipIntegrationTest(unittest.TestCase):
             "--vcf", self.test_vcf,
             "--output-dir", self.output_dir,
             "--offline",
-            "--subset-freq", "0.001",  # Very low to get < 5000 SNPs
+            "--subset-freq", "0.001",  # Very low to get < 1000 SNPs
             "--processes", "2"
         ]
 

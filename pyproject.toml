@@ -26,6 +26,7 @@ dynamic = ["version"]
 
 [project.scripts]
 snpsnip = "snpsnip:main"
+snpsnip-generate-example = "snpsnip.generate_example:main"
 
 
 [tool.setuptools_scm]
