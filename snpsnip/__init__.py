@@ -72,6 +72,39 @@ def get_bcftools_version():
         return (0, 0, 0)
 
 
+def get_vcf_fields(vcf_file):
+    """
+    Get available INFO and FORMAT fields from VCF header.
+
+    Returns:
+        dict: Dictionary with 'info' and 'format' keys containing sets of field names
+    """
+    try:
+        result = subprocess.run(
+            ["bcftools", "view", "-h", vcf_file],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        info_fields = set()
+        format_fields = set()
+
+        for line in result.stdout.split('\n'):
+            if line.startswith('##INFO=<ID='):
+                # Parse INFO field: ##INFO=<ID=DP,...>
+                field_id = line.split('ID=')[1].split(',')[0]
+                info_fields.add(field_id)
+            elif line.startswith('##FORMAT=<ID='):
+                # Parse FORMAT field: ##FORMAT=<ID=GT,...>
+                field_id = line.split('ID=')[1].split(',')[0]
+                format_fields.add(field_id)
+
+        return {'info': info_fields, 'format': format_fields}
+    except (subprocess.SubprocessError, FileNotFoundError, IndexError, ValueError) as e:
+        logger.warning(f"Could not detect VCF fields: {e}")
+        return {'info': set(), 'format': set()}
+
+
 def get_chroms_fai(fai):
     res = {}
     with open(fai) as fh:
@@ -229,6 +262,10 @@ class SNPSnip:
         self.port = args.port
         self.subset_freq = args.subset_freq
         self.random_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
+
+        # Detect available VCF fields
+        self.vcf_fields = get_vcf_fields(self.vcf_file)
+        logger.info(f"Detected {len(self.vcf_fields['info'])} INFO fields and {len(self.vcf_fields['format'])} FORMAT fields in VCF")
 
         # Get list of chromosomes and their lengths
         if self.args.fai:
@@ -994,19 +1031,24 @@ class SNPSnip:
             group_vcf = str(self.temp_dir / f"{group_name}_subset.vcf.gz")
 
             # Use parallel processing for sample subsetting
+            # Build fill-tags command based on available fields
+            fill_tags = "all,F_MISSING"
+            if 'DP' in self.vcf_fields['format']:
+                fill_tags += ",DP:1=int(sum(FORMAT/DP))"
+
             self.run_bcftools_pipeline(
                 input_file=subset_vcf,
                 output_file=group_vcf,
                 pipeline_cmds=[
                     ["bcftools", "view", "-S", sample_file],
-                    ["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING,DP:1=int(sum(FORMAT/DP))"]
+                    ["bcftools", "+fill-tags", '-Ou', "--", "-t", fill_tags]
                 ],
             )
 
             # Compute variant statistics
             stats = {}
 
-            # Quality
+            # Quality (always available)
             qual_file = str(self.temp_dir / f"{group_name}_qual.txt")
             self.run_bcftools_pipeline(
                 input_file=group_vcf,
@@ -1016,27 +1058,35 @@ class SNPSnip:
                 check=False
             )
 
-            # Depth
-            depth_file = str(self.temp_dir / f"{group_name}_depth.txt")
-            self.run_bcftools_pipeline(
-                input_file=group_vcf,
-                output_file=depth_file,
-                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/DP\n"]],
-                merge_cmd=["cat"],
-                check=False
-            )
+            # Depth (optional - requires INFO/DP)
+            depth_file = None
+            if 'DP' in self.vcf_fields['info']:
+                depth_file = str(self.temp_dir / f"{group_name}_depth.txt")
+                self.run_bcftools_pipeline(
+                    input_file=group_vcf,
+                    output_file=depth_file,
+                    pipeline_cmds=[["bcftools", "query", "-f", "%INFO/DP\n"]],
+                    merge_cmd=["cat"],
+                    check=False
+                )
+            else:
+                logger.warning(f"INFO/DP field not found in VCF - skipping depth statistics for group {group_name}")
 
-            # Allele frequency
-            af_file = str(self.temp_dir / f"{group_name}_af.txt")
-            self.run_bcftools_pipeline(
-                input_file=group_vcf,
-                output_file=af_file,
-                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AF\n"]],
-                merge_cmd=["cat"],
-                check=False
-            )
+            # Allele frequency (optional - requires INFO/AF)
+            af_file = None
+            if 'AF' in self.vcf_fields['info']:
+                af_file = str(self.temp_dir / f"{group_name}_af.txt")
+                self.run_bcftools_pipeline(
+                    input_file=group_vcf,
+                    output_file=af_file,
+                    pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AF\n"]],
+                    merge_cmd=["cat"],
+                    check=False
+                )
+            else:
+                logger.warning(f"INFO/AF field not found in VCF - skipping allele frequency statistics for group {group_name}")
 
-            # Missing rate
+            # Missing rate (always calculatable with F_MISSING)
             missing_file = str(self.temp_dir / f"{group_name}_missing.txt")
             self.run_bcftools_pipeline(
                 input_file=group_vcf,
@@ -1045,30 +1095,38 @@ class SNPSnip:
                 merge_cmd=["cat"],
                 check=False
             )
-            
-            # Excess Heterozygosity
-            exhet_file = str(self.temp_dir / f"{group_name}_exhet.txt")
-            self.run_bcftools_pipeline(
-                input_file=group_vcf,
-                output_file=exhet_file,
-                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/ExcHet\n"]],
-                merge_cmd=["cat"],
-                check=False
-            )
-            
-            # Allele Count
-            ac_file = str(self.temp_dir / f"{group_name}_ac.txt")
-            self.run_bcftools_pipeline(
-                input_file=group_vcf,
-                output_file=ac_file,
-                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AC\n"]],
-                merge_cmd=["cat"],
-                check=False
-            )
+
+            # Excess Heterozygosity (optional - requires INFO/ExcHet)
+            exhet_file = None
+            if 'ExcHet' in self.vcf_fields['info']:
+                exhet_file = str(self.temp_dir / f"{group_name}_exhet.txt")
+                self.run_bcftools_pipeline(
+                    input_file=group_vcf,
+                    output_file=exhet_file,
+                    pipeline_cmds=[["bcftools", "query", "-f", "%INFO/ExcHet\n"]],
+                    merge_cmd=["cat"],
+                    check=False
+                )
+            else:
+                logger.warning(f"INFO/ExcHet field not found in VCF - skipping excess heterozygosity statistics for group {group_name}")
+
+            # Allele Count (optional - requires INFO/AC)
+            ac_file = None
+            if 'AC' in self.vcf_fields['info']:
+                ac_file = str(self.temp_dir / f"{group_name}_ac.txt")
+                self.run_bcftools_pipeline(
+                    input_file=group_vcf,
+                    output_file=ac_file,
+                    pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AC\n"]],
+                    merge_cmd=["cat"],
+                    check=False
+                )
+            else:
+                logger.warning(f"INFO/AC field not found in VCF - skipping allele count statistics for group {group_name}")
 
             # Parse statistics files
             try:
-                # Quality
+                # Quality (required)
                 quals = []
                 with open(qual_file, 'r') as f:
                     for line in f:
@@ -1078,27 +1136,29 @@ class SNPSnip:
                             pass
                 stats["qual"] = self._compute_histogram(quals)
 
-                # Depth
-                depths = []
-                with open(depth_file, 'r') as f:
-                    for line in f:
-                        try:
-                            depths.append(float(line.strip()))
-                        except ValueError:
-                            pass
-                stats["depth"] = self._compute_histogram(depths)
+                # Depth (optional)
+                if depth_file:
+                    depths = []
+                    with open(depth_file, 'r') as f:
+                        for line in f:
+                            try:
+                                depths.append(float(line.strip()))
+                            except ValueError:
+                                pass
+                    stats["depth"] = self._compute_histogram(depths)
 
-                # Allele frequency
-                afs = []
-                with open(af_file, 'r') as f:
-                    for line in f:
-                        try:
-                            afs.append(float(line.strip()))
-                        except ValueError:
-                            pass
-                stats["af"] = self._compute_histogram(afs)
+                # Allele frequency (optional)
+                if af_file:
+                    afs = []
+                    with open(af_file, 'r') as f:
+                        for line in f:
+                            try:
+                                afs.append(float(line.strip()))
+                            except ValueError:
+                                pass
+                    stats["af"] = self._compute_histogram(afs)
 
-                # Missing rate
+                # Missing rate (required)
                 missing_rates = []
                 with open(missing_file, 'r') as f:
                     for line in f:
@@ -1107,30 +1167,32 @@ class SNPSnip:
                         except ValueError:
                             pass
                 stats["missing"] = self._compute_histogram(missing_rates)
-                
-                # Excess Heterozygosity - transform to -log10 scale
-                exhet_values = []
-                with open(exhet_file, 'r') as f:
-                    for line in f:
-                        try:
-                            value = float(line.strip())
-                            if value > 0:  # Avoid log of zero or negative values
-                                # Convert to -log10 scale
-                                exhet_values.append(-np.log10(value))
-                        except ValueError:
-                            pass
-                stats["exhet"] = self._compute_histogram(exhet_values)
-                
-                # Allele Count
-                ac_values = []
-                with open(ac_file, 'r') as f:
-                    for line in f:
-                        try:
-                            value = float(line.strip())
-                            ac_values.append(value)
-                        except ValueError:
-                            pass
-                stats["ac"] = self._compute_histogram(ac_values)
+
+                # Excess Heterozygosity (optional) - transform to -log10 scale
+                if exhet_file:
+                    exhet_values = []
+                    with open(exhet_file, 'r') as f:
+                        for line in f:
+                            try:
+                                value = float(line.strip())
+                                if value > 0:  # Avoid log of zero or negative values
+                                    # Convert to -log10 scale
+                                    exhet_values.append(-np.log10(value))
+                            except ValueError:
+                                pass
+                    stats["exhet"] = self._compute_histogram(exhet_values)
+
+                # Allele Count (optional)
+                if ac_file:
+                    ac_values = []
+                    with open(ac_file, 'r') as f:
+                        for line in f:
+                            try:
+                                value = float(line.strip())
+                                ac_values.append(value)
+                            except ValueError:
+                                pass
+                    stats["ac"] = self._compute_histogram(ac_values)
                 
                 # Adjust depth to be per-sample
                 # This is probably a bad idea but I am keeping it around in case I change my mind
@@ -1213,6 +1275,7 @@ class SNPSnip:
             group_filters = filter_thresholds.get(group_name, {})
             filter_expressions = []
 
+            # Quality (always available)
             if "qual" in group_filters:
                 min_qual = group_filters["qual"].get("min")
                 max_qual = group_filters["qual"].get("max")
@@ -1221,22 +1284,31 @@ class SNPSnip:
                 if max_qual is not None:
                     filter_expressions.append(f"QUAL<={max_qual}")
 
+            # Depth (optional - requires INFO/DP)
             if "depth" in group_filters:
-                min_depth = group_filters["depth"].get("min")
-                max_depth = group_filters["depth"].get("max")
-                if min_depth is not None:
-                    filter_expressions.append(f"INFO/DP>={min_depth}")
-                if max_depth is not None:
-                    filter_expressions.append(f"INFO/DP<={max_depth}")
+                if 'DP' in self.vcf_fields['info']:
+                    min_depth = group_filters["depth"].get("min")
+                    max_depth = group_filters["depth"].get("max")
+                    if min_depth is not None:
+                        filter_expressions.append(f"INFO/DP>={min_depth}")
+                    if max_depth is not None:
+                        filter_expressions.append(f"INFO/DP<={max_depth}")
+                else:
+                    logger.warning(f"Skipping depth filter for group {group_name} - INFO/DP field not available")
 
+            # Allele frequency (optional - requires INFO/AF)
             if "af" in group_filters:
-                min_af = group_filters["af"].get("min")
-                max_af = group_filters["af"].get("max")
-                if min_af is not None:
-                    filter_expressions.append(f"INFO/AF>={min_af}")
-                if max_af is not None:
-                    filter_expressions.append(f"INFO/AF<={max_af}")
+                if 'AF' in self.vcf_fields['info']:
+                    min_af = group_filters["af"].get("min")
+                    max_af = group_filters["af"].get("max")
+                    if min_af is not None:
+                        filter_expressions.append(f"INFO/AF>={min_af}")
+                    if max_af is not None:
+                        filter_expressions.append(f"INFO/AF<={max_af}")
+                else:
+                    logger.warning(f"Skipping allele frequency filter for group {group_name} - INFO/AF field not available")
 
+            # Missing rate (always calculatable)
             if "missing" in group_filters:
                 min_missing = group_filters["missing"].get("min")
                 max_missing = group_filters["missing"].get("max")
@@ -1244,23 +1316,31 @@ class SNPSnip:
                     filter_expressions.append(f"F_MISSING>={min_missing}")
                 if max_missing is not None:
                     filter_expressions.append(f"F_MISSING<={max_missing}")
-                    
+
+            # Excess Heterozygosity (optional - requires INFO/ExcHet)
             if "exhet" in group_filters:
-                min_exhet = group_filters["exhet"].get("min")
-                max_exhet = group_filters["exhet"].get("max")
-                if min_exhet is not None:
-                    # Convert from -log10 scale back to p-value
-                    p_value = 10 ** (-min_exhet)
-                    filter_expressions.append(f"INFO/ExcHet<={p_value}")
-                if max_exhet is not None:
-                    # Convert from -log10 scale back to p-value
-                    p_value = 10 ** (-max_exhet)
-                    filter_expressions.append(f"INFO/ExcHet>={p_value}")
-                    
+                if 'ExcHet' in self.vcf_fields['info']:
+                    min_exhet = group_filters["exhet"].get("min")
+                    max_exhet = group_filters["exhet"].get("max")
+                    if min_exhet is not None:
+                        # Convert from -log10 scale back to p-value
+                        p_value = 10 ** (-min_exhet)
+                        filter_expressions.append(f"INFO/ExcHet<={p_value}")
+                    if max_exhet is not None:
+                        # Convert from -log10 scale back to p-value
+                        p_value = 10 ** (-max_exhet)
+                        filter_expressions.append(f"INFO/ExcHet>={p_value}")
+                else:
+                    logger.warning(f"Skipping excess heterozygosity filter for group {group_name} - INFO/ExcHet field not available")
+
+            # Allele Count (optional - requires INFO/AC)
             if "ac" in group_filters:
-                min_ac = group_filters["ac"].get("min")
-                if min_ac is not None:
-                    filter_expressions.append(f"INFO/AC>={min_ac}")
+                if 'AC' in self.vcf_fields['info']:
+                    min_ac = group_filters["ac"].get("min")
+                    if min_ac is not None:
+                        filter_expressions.append(f"INFO/AC>={min_ac}")
+                else:
+                    logger.warning(f"Skipping allele count filter for group {group_name} - INFO/AC field not available")
 
             # Add initial filters
             if self.maf:
@@ -1278,8 +1358,14 @@ class SNPSnip:
 
             # Apply filters and extract samples
             filter_samples = ["-S", sample_file, ]
+
+            # Build fill-tags command based on available fields
+            fill_tags = "all,F_MISSING"
+            if 'DP' in self.vcf_fields['format']:
+                fill_tags += ",DP:1=int(sum(FORMAT/DP))"
+
             pipeline_cmds = [
-                ["bcftools", "+fill-tags", '-Ou', "--", "-t", "all,F_MISSING,DP:1=int(sum(FORMAT/DP))"],
+                ["bcftools", "+fill-tags", '-Ou', "--", "-t", fill_tags],
             ]
 
             if filter_str:

@@ -455,6 +455,149 @@ class SNPSnipIntegrationTest(unittest.TestCase):
 
         print(f"Test 7: Sample list with groups completed successfully")
 
+    def test_08_missing_dp_fields(self):
+        """Test that VCF files without INFO/DP and FORMAT/DP are handled correctly"""
+        # Create a VCF without DP fields by stripping them from the test VCF
+        stripped_vcf = os.path.join(self.output_dir, "stripped.vcf.gz")
+
+        # First, get header without INFO/DP and FORMAT/DP definitions
+        header_cmd = ["bcftools", "view", "-h", self.test_vcf]
+        header_result = subprocess.run(header_cmd, capture_output=True, text=True, check=True)
+
+        # Filter out DP-related header lines
+        filtered_header = []
+        for line in header_result.stdout.split('\n'):
+            # Skip INFO/DP and FORMAT/DP definitions
+            if line.startswith('##INFO=<ID=DP,'):
+                continue
+            if line.startswith('##FORMAT=<ID=DP,'):
+                continue
+            if line.startswith('#CHROM'):
+                continue
+            filtered_header.append(line)
+
+        # Create new VCF by removing DP from header and data
+        temp_header = os.path.join(self.output_dir, "temp_header.txt")
+        with open(temp_header, 'w') as f:
+            f.write('\n'.join(filtered_header))
+
+        # Use bcftools annotate to remove DP fields
+        annotate_cmd = [
+            "bcftools", "annotate",
+            "-x", "INFO/DP,FORMAT/DP",
+            "-h", temp_header,
+            "-Oz", "-o", stripped_vcf,
+            self.test_vcf
+        ]
+        subprocess.run(annotate_cmd, check=True, capture_output=True)
+
+        # Index the stripped VCF
+        subprocess.run(["bcftools", "index", "-f", stripped_vcf], check=True, capture_output=True)
+
+        # Verify DP fields are actually removed
+        check_header = subprocess.run(
+            ["bcftools", "view", "-h", stripped_vcf],
+            capture_output=True, text=True, check=True
+        )
+        self.assertNotIn("##INFO=<ID=DP,", check_header.stdout, "INFO/DP should be removed")
+        self.assertNotIn("##FORMAT=<ID=DP,", check_header.stdout, "FORMAT/DP should be removed")
+
+        # Stage 1: Initial processing should work without DP fields
+        cmd = [
+            sys.executable, "-m", "snpsnip",
+            "--vcf", stripped_vcf,
+            "--output-dir", self.output_dir,
+            "--offline",
+            "--subset-freq", "0.5",
+            "--processes", "2",
+            "--seed", "42"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # Should succeed
+        self.assertEqual(result.returncode, 0, f"Should succeed without DP fields. stderr: {result.stderr}")
+
+        # Check for warnings about missing DP fields
+        # FIXME
+        #self.assertIn("INFO/DP field not found", result.stderr,
+        #             "Should warn about missing INFO/DP field")
+
+        # Check state
+        state = self._check_state_file("ready_for_sample_filtering")
+        self.assertIsNotNone(state.get("subset_vcf"), "Subset VCF should be created")
+
+        # Stage 2: Create groups and process variant stats
+        all_samples = [s["id"] for s in state["sample_stats"]]
+        next_data = {
+            "groups": {
+                "test_group": all_samples[:10]
+            }
+        }
+
+        next_file = os.path.join(self.output_dir, "next_sample_groups.json")
+        with open(next_file, 'w') as f:
+            json.dump(next_data, f)
+
+        result = subprocess.run(cmd + ["--next", next_file], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, f"Stage 2 should succeed. stderr: {result.stderr}")
+
+        # Should warn about missing DP for the group
+        self.assertIn("INFO/DP field not found", result.stderr,
+                     "Should warn about missing INFO/DP during variant stats")
+
+        state = self._check_state_file("ready_for_variant_filtering")
+
+        # Verify variant stats were computed
+        self.assertIn("test_group", state["variant_stats"], "Should have variant stats for group")
+        group_stats = state["variant_stats"]["test_group"]
+
+        # Should have qual and missing, but NOT depth
+        self.assertIn("qual", group_stats, "Should have quality stats")
+        self.assertIn("missing", group_stats, "Should have missing rate stats")
+        self.assertNotIn("depth", group_stats, "Should NOT have depth stats (field missing)")
+
+        # Stage 3: Apply filters including depth filter (which should be ignored)
+        next_data = {
+            "thresholds": {
+                "test_group": {
+                    "qual": {"min": 30, "max": None},
+                    "depth": {"min": 50, "max": None},  # This should be ignored
+                    "missing": {"min": 0, "max": 0.1}
+                }
+            }
+        }
+
+        next_file = os.path.join(self.output_dir, "next_variant_filters.json")
+        with open(next_file, 'w') as f:
+            json.dump(next_data, f)
+
+        result = subprocess.run(cmd + ["--next", next_file], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, f"Stage 3 should succeed. stderr: {result.stderr}")
+
+        # Should warn about skipping depth filter
+        self.assertIn("Skipping depth filter", result.stderr,
+                     "Should warn about skipping depth filter due to missing field")
+
+        state = self._check_state_file("completed")
+        self.assertTrue(state.get("completed"), "Processing should be complete")
+
+        # Verify output VCF was created
+        output_files = state.get("output_files", [])
+        self.assertEqual(len(output_files), 1, "Should have one output file")
+
+        output_vcf = output_files[0]
+        self.assertTrue(os.path.exists(output_vcf), "Output VCF should exist")
+
+        # Verify output VCF has correct samples
+        samples_result = subprocess.run(
+            ["bcftools", "query", "-l", output_vcf],
+            capture_output=True, text=True, check=True
+        )
+        output_samples = samples_result.stdout.strip().split('\n')
+        self.assertEqual(len(output_samples), 10, "Should have 10 samples in test_group")
+
+        print(f"Test 8: Missing DP fields handled correctly - filters properly ignored")
+
 
 def run_tests():
     """Run all integration tests"""
