@@ -47,9 +47,29 @@ from ._version import __version__, __version_tuple__
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(message)s",
 )
 logger = logging.getLogger("snpsnip")
+
+
+def get_bcftools_version():
+    """Get bcftools version as a tuple of integers (major, minor, patch)."""
+    try:
+        result = subprocess.run(
+            ["bcftools", "--version"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Parse version from first line: "bcftools 1.18"
+        version_line = result.stdout.strip().split('\n')[0]
+        version_str = version_line.split()[1]
+        # Handle versions like "1.18" or "1.18-dirty" or "1.18.1"
+        version_parts = version_str.split('-')[0].split('.')
+        return tuple(int(x) for x in version_parts)
+    except (subprocess.SubprocessError, FileNotFoundError, IndexError, ValueError):
+        # If we can't parse version, assume old version
+        return (0, 0, 0)
 
 
 def get_chroms_fai(fai):
@@ -101,7 +121,7 @@ def regions_from_chroms(chroms, region_size=1_000_000):
 
 
 # Standalone function for processing a region (needed for multiprocessing)
-def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True, region_index: int = 0, random_seed: int = 0):
+def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filters: List[str] = None, input_format: str = "-Ou", vcf_out: bool = True, region_index: int = 0, random_seed: int = 0, bcftools_version: Tuple[int, ...] = (0, 0, 0)):
     """
     Process a single genomic region with bcftools.
 
@@ -116,6 +136,7 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
         vcf_out: Whether output is VCF format
         region_index: Sequential index of this region (for seeding)
         random_seed: Base random seed
+        bcftools_version: Tuple of bcftools version (major, minor, patch)
 
     Returns:
         Path to output file or None if processing failed
@@ -142,9 +163,15 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
     # Construct the command for this region
     region_cmd = [["bcftools", "view", input_format, "-r", region,  *filters, input_file]] + modified_pipeline_cmds
     if vcf_out:
-        region_cmd.append(
-            ["bcftools", "view", "-Ob1", "--write-index", "-o", region_output]
-        )
+        # Check if bcftools supports --write-index (version >= 1.18)
+        if bcftools_version >= (1, 18):
+            region_cmd.append(
+                ["bcftools", "view", "-Ob1", "--write-index", "-o", region_output]
+            )
+        else:
+            region_cmd.append(
+                ["bcftools", "view", "-Ob1", "-o", region_output]
+            )
 
     # Convert command lists to strings
     cmd_strings = [shlex.join(cmd) for cmd in region_cmd]
@@ -155,6 +182,9 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
     try:
         if vcf_out:
             subprocess.run(full_cmd, shell=True, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # If using old bcftools, index separately
+            if bcftools_version < (1, 18):
+                subprocess.run(["bcftools", "index", "-f", region_output], check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
             with open(region_output, 'wb') as out_file:
                 subprocess.run(full_cmd, shell=True, check=check, stdout=out_file, stderr=subprocess.PIPE)
@@ -184,6 +214,7 @@ class SNPSnip:
         self.region_size = args.region_size
         self.offline_mode = args.offline
         self.next_file = args.next
+        self.bcftools_version = get_bcftools_version()
 
         if args.state_file:
             self.state_file = Path(args.state_file)
@@ -661,7 +692,11 @@ class SNPSnip:
         if merge_cmd is None:
             # Check if output is likely VCF or text
             if is_vcf:
-                merge_cmd = ["bcftools", "concat", "--no-version", "--allow-overlaps", "--verbose", "0", out_format, "--threads", str(processes), "--write-index", "-o", output_file]
+                # Check if bcftools supports --write-index (version >= 1.18)
+                if self.bcftools_version >= (1, 18):
+                    merge_cmd = ["bcftools", "concat", "--no-version", "--allow-overlaps", "--verbose", "0", out_format, "--threads", str(processes), "--write-index", "-o", output_file]
+                else:
+                    merge_cmd = ["bcftools", "concat", "--no-version", "--allow-overlaps", "--verbose", "0", out_format, "--threads", str(processes), "-o", output_file]
             else:
                 merge_cmd = ["cat"]
 
@@ -670,7 +705,7 @@ class SNPSnip:
         with ProcessPoolExecutor(max_workers=processes) as executor:
             # Create a list of arguments for each region
             futures = [
-                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf, region_index=idx, random_seed=self.random_seed)
+                executor.submit(process_region, region, input_file, temp_dir_str, pipeline_cmds, check, filters=filters, input_format=input_format, vcf_out=is_vcf, region_index=idx, random_seed=self.random_seed, bcftools_version=self.bcftools_version)
                 for idx, region in enumerate(regions)
             ]
 
@@ -701,7 +736,11 @@ class SNPSnip:
                 merge_cmd.append(region_file)
             logger.debug(f"Merging outputs: {shlex.join(merge_cmd)}")
             subprocess.run(merge_cmd, check=check)
-            if not Path(output_file + ".csi").exists():
+            # If bcftools version < 1.18, always index after merge
+            if self.bcftools_version < (1, 18):
+                logger.debug("Indexing merged output (bcftools < 1.18)...")
+                subprocess.run(["bcftools", "index", "-f", output_file], check=check)
+            elif not Path(output_file + ".csi").exists():
                 logger.debug("Merging did not create an index, so I have to make one...")
                 subprocess.run(["bcftools", "index", "-f", output_file], check=check)
 
@@ -1306,6 +1345,15 @@ def main():
     # Check if input file exists
     if not os.path.exists(args.vcf):
         logger.error(f"Input VCF file not found: {args.vcf}")
+        sys.exit(1)
+
+    # Check if VCF is indexed
+    vcf_index_csi = args.vcf + ".csi"
+    vcf_index_tbi = args.vcf + ".tbi"
+    if not os.path.exists(vcf_index_csi) and not os.path.exists(vcf_index_tbi):
+        logger.error(f"Input VCF file MUST be indexed!")
+        logger.error(f"Expected index file: {vcf_index_csi} or {vcf_index_tbi}")
+        logger.error(f"Please run: bcftools index {args.vcf}")
         sys.exit(1)
 
     # Check if bcftools is available
