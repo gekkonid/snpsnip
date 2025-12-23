@@ -794,7 +794,21 @@ class SNPSnip:
 
 
     def get_regions(self):
-        return regions_from_chroms(self.chroms, self.region_size if hasattr(self, 'region_size') else 1000000)
+        regions = regions_from_chroms(self.chroms, self.region_size if hasattr(self, 'region_size') else 1000000)
+        num_regions = len(regions)
+
+        # Check for too many regions (file descriptor limit issues)
+        if num_regions > 2048:
+            logger.error(f"Too many regions ({num_regions}) - this will exceed system file descriptor limits!")
+            logger.error(f"Please increase --region-size (currently {self.region_size:,}) to reduce the number of regions.")
+            logger.error(f"For example, try --region-size {self.region_size * 4:,} to reduce regions by ~4x")
+            raise SystemExit(1)
+        elif num_regions > 512:
+            logger.warning(f"Large number of regions ({num_regions}) detected - may cause issues with file descriptors on some systems")
+            logger.warning(f"If you encounter 'too many open files' errors, increase --region-size (currently {self.region_size:,})")
+            logger.warning(f"For example, try --region-size {self.region_size * 2:,} to reduce regions by ~2x")
+
+        return regions
 
     def _create_snp_subset(self):
         """Create a random subset of SNPs passing basic filters."""
