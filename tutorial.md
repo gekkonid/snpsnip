@@ -84,7 +84,7 @@ then your file is incompatible in some novel way, please contact me or raise an
 issue on github.
 
 
-Generate a test dataset with 50 samples and 1M SNPs, including example filter
+First, let's generate a test dataset with 50 samples and 1M SNPs, including example filter
 files:
 
 ```bash
@@ -95,7 +95,7 @@ This will create:
 - `example.vcf.gz` and `example.vcf.gz.csi` (VCF and index)
 - Two example filter files. (You will normally generate these files by loading
   a Web UI, making your selections, and saving the file from your browser. They
-  are generated here for convenience and testing.
+  are generated here for convenience and testing.)
     - `snpsnip_sample_filters.json`
     - `snpsnip_variant_filters.json`
 
@@ -111,8 +111,8 @@ locally.
 If you generated example data with `--with-filters`, you can skip the
 interactive HTML steps, and supply the JSON files made by the example data
 generator in the steps below. For a more practical walk-through, open the HTML,
-play with the data, and export your selections as you would for your own data,
-saving and using the JSON files that the web UI generates.
+play with the filters and thresholds, and export your selections as you would
+for your own data, saving and using the JSON files that the web UI generates.
 
 ### Step 1: Calculate sample statistics and PCA
 
@@ -121,7 +121,8 @@ snpsnip --vcf example.vcf.gz --output-dir example_offline --offline --maf 0.01
 ```
 
 This generates a static HTML file (`example_offline/snpsnip_sample_filters.html`)
-you can copy to your local machine and open in your browser to set sample
+you can copy to your local machine (if you're running this remotely on a
+server), and open in your browser. Use this web interface to set sample
 filtering thresholds and define sample groups. Save your selections as a JSON
 file.
 
