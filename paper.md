@@ -7,13 +7,15 @@ tags:
   - variant calling
   - data filtering
 authors:
-  - name: [Author Name]
-    orcid: [ORCID ID]
-    affiliation: 1
+  - name: Kevin D. Murray
+    orcid: 0000-0002-2466-1917
+    affiliation: "1,2"
 affiliations:
- - name: [Institution Name]
+ - name: Gekkonid Scientific P/L, Melbourne, AU
    index: 1
-date: [Date]
+ - name: Max Planck Institute for Biology, Tübingen, DE
+   index: 2
+date: 2026-01-15
 bibliography: paper.bib
 ---
 
@@ -37,41 +39,47 @@ the terms of the Mozilla Public License v2.
 # Statement of Need
 
 Modern population and quantitative genomics studies generate enormous variant
-datasets, for example 1000 *Arabidopsis* samples at 6 million SNPs (@alonso
-blanco). The variant callers used to generate such data do not produce
-perfectly accurate calls, and different downstream analyses often have their
-own optimal filtering and signal-to-noise tradeoffs. Compounding this,
-industry-standard tools for variant filtering like BCFtools typically do not
-scale linearly when given additional CPUs, as only some parts of the overall
-computation are parallelised.
+datasets, for example 1000 *Arabidopsis* samples at 6 million SNPs
+[@alonso-blanco16_1001genomes]. The variant callers used to generate such data
+do not produce perfectly accurate calls, and different downstream analyses
+often have their own optimal filtering and signal-to-noise tradeoffs
+[@ahrens21_regardingfword]. Compounding this, industry-standard tools for
+variant filtering like BCFtools typically do not scale linearly when given
+additional CPUs, as only some parts of the overall computation are
+parallelised.
 
 Typically, researchers will use a variant dataset in multiple downstream
 analyses, perhaps with different degrees of stringency of sample or SNP
 quality, or with different sample subsets. To determine the appropriate sample
 groupings and sample/SNP quality thresholds, and select data-defined subsets, a
 researcher must interactively plot quality measures and measures of sample
-identity and relatedness (e.g. PCA). These statistics are typically calculated
-from an arbitrary subset of a VCF, and statistics are calculated, plotted, and
-decisions made in an interactive statistical environment e.g. R. Decisions must
-then be ported back to filtering pipelines, which may run on remote servers or
+identity and relatedness [@marees18tutorialconducting;@ahrens21_regardingfword].
+These statistics are typically calculated from an arbitrary subset of a VCF,
+and statistics are calculated, plotted, and decisions made in an interactive
+statistical environment e.g. R. Decisions must then be ported back to more
+scalable programs or filtering pipelines, which may run on remote servers or
 batch queue systems.
+
 
 # State of the Field
 
 Existing tools and approaches for variant filtering are typically either tools
-for efficient batch processing of variant data, for example PLINK, VCFtools and
-BCFtools, or generally less efficient tools for interactive exploration of
-variant datasets, e.g. R packages VariantAnnotation and vcfR. Neither of these
-classes of tool fully address the problem of user-friendly, interactive
-filtering of very large datases, as they either simply filter based on
-predefined thresholds with no interacrtive/exploratory phase (in the case of
-tools like BCFtools and PLINK), or become inefficient with truy massive
-datasets (in the case of the various scripting pacakges for interactive
-explorations of VCFs). Some notable excptions are scripting packages designed
-specifivally for very large VCF datasets, for example SNPRelate in R, or
-sgkit/VCFZarr/bio2zarr in python. However, such tools achive their efficiency
-by converting VCFs to a bespoke format, and typically provide the user with
-tooling to perform certain analyses in their framework.
+for efficient batch processing of variant data, for example
+PLINK[@chang15_secondgenerationplink], VCFtools[@danecek12_variantcall] and
+BCFtools[@danecek21_bcftools12years], or generally less efficient tools for
+interactive exploration of variant datasets, e.g. R packages
+VariantAnnotation[@obenchain14_variantannotationbioconductor] and
+vcfR[@knaus17_vcfrpackage;@knaus16_vcfrpackage]. Neither of these classes of
+tool fully address the problem of user-friendly, interactive filtering of very
+large datases, as they either require predefined thresholds with
+no interacrtive/exploratory phase (in the case of tools like BCFtools and
+PLINK), or become inefficient with truy massive datasets (in the case of the
+various scripting pacakges for interactive explorations of VCFs). Some notable
+excptions are scripting packages designed specifically for very large VCF
+datasets, for example SNPRelate in R[@zheng12_highperformancecomputing], or
+sgkit/VCFZarr in Python[@czech25_analysisreadyvcf]. However, such tools acheive
+their efficiency by converting VCFs to a bespoke format, and typically provide
+the user with tooling to perform certain analyses in their framework.
 
 
 `SNPSnip` addresses these limitations by providing an integrated workflow that
@@ -118,7 +126,6 @@ dataset with which to learn how SNPSnip operates.
 
 # Research Impact statement
 
-
 The deveopment of SNPsnip was driven by our own work in plant popualtion
 genomics, for which we need high-througput interactive filtering where data did
 not need to move between remote workers and an HPC cluster. Despite being both
@@ -127,14 +134,12 @@ research groups in quantiative, population, and evolutionary genetics using the
 tool.
 
 
-
 # AI Usage Disclosure
 
 The core code and documentation of SNPSnip was written by hand, however coding
 of some javascript UI code and integration tests, and some refactoring was
 aided by LLMs, and all code was reviewed for bugs (and some bugs fixed) by
 LLMs. We verified all output of LLMs for correctness.
-
 
 
 # References
