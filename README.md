@@ -2,8 +2,6 @@
 
 SNPSnip is a command-line tool with an interactive web interface for filtering VCF files in multiple stages.
 
-**NB: this is beta software still in active development, if it breaks or has inaccuracies please let me know**
-
 ### Prerequisites
 
 - Python 3.8 or higher
@@ -76,6 +74,8 @@ snpsnip --vcf input.vcf.gz --offline --next snpsnip_variant_filters.json
 
 # This will generate the final files.
 ```
+
+For more details, see [the `SNPSnip` tutorial](tutorial.md)
 
 ## License
 
