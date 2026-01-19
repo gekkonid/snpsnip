@@ -1,11 +1,11 @@
 # SNPSnip - An interactive VCF Filtering Tool
 
-SNPSnip is a command-line tool with an interactive web interface for filtering VCF files in multiple stages.
+SNPSnip is a command-line tool with an interactive web interface for filtering VCF files.
 
 ### Prerequisites
 
 - Python 3.8 or higher
-- bcftools 1.18 or higher must be installed and available in your PATH (check with `bcftools --version`, a statically compiled version is [available here](https://github.com/kdm9/static_samtools_bcftools/releases/latest))
+- bcftools (ideally 1.18 or higher) must be installed and available in your PATH (check with `bcftools --version`, a statically compiled version is [available here](https://github.com/kdm9/static_samtools_bcftools/releases/latest))
 
 ### Install
 
