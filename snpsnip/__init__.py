@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 
 import numpy as np
+import h5py
 import pandas as pd
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from sklearn.decomposition import PCA
@@ -246,6 +247,7 @@ class SNPSnip:
         self.processes = args.processes
         self.region_size = args.region_size
         self.offline_mode = args.offline
+        self.r_notebook = args.r_notebook
         self.next_file = args.next
         self.bcftools_version = get_bcftools_version()
 
@@ -341,7 +343,14 @@ class SNPSnip:
                 next_data = json.load(f)
                 
             # Update state based on the stage
-            if "groups" in next_data:
+            if "groups" in next_data and "thresholds" in next_data:
+                # Combined R notebook output: skip variant stats, go directly to final
+                self.state["sample_groups"] = next_data["groups"]
+                self._validate_groups()
+                self.state["filter_thresholds"] = next_data["thresholds"]
+                self.state["stage"] = "ready_for_final"
+                logger.info(f"Loaded combined R notebook selections from {self.next_file}")
+            elif "groups" in next_data:
                 # This is from sample filtering
                 self.state["sample_groups"] = next_data["groups"]
                 self._validate_groups()
@@ -578,6 +587,235 @@ class SNPSnip:
         logger.info(f"Generated static HTML file: {output_file}")
         return output_file
 
+    def _extract_r_matrix_data(self):
+        """Extract genotype and depth matrices from the subset VCF for R export.
+
+        Returns numpy arrays (not Python lists) so that peak memory is bounded
+        by the array size rather than Python's per-object overhead (~28 bytes
+        per int in a list vs 1 byte per cell for int8).
+        """
+        subset_vcf = self.state["subset_vcf"]
+
+        # Sample order
+        samples_result = self._run_bcftools(["query", "-l", subset_vcf])
+        samples = samples_result.stdout.strip().split('\n')
+        n_samples = len(samples)
+
+        # SNP info query
+        fmt_parts = ["%CHROM", "%POS", "%REF", "%ALT", "%QUAL", "%INFO/F_MISSING"]
+        available_stats = ["qual", "f_missing"]
+        if "DP" in self.vcf_fields["info"]:
+            fmt_parts.append("%INFO/DP")
+            available_stats.append("dp")
+        # MAF always present after fill-tags (bcftools +fill-tags -t all always computes MAF)
+        fmt_parts.append("%INFO/MAF")
+        available_stats.append("maf")
+        if "AC" in self.vcf_fields["info"]:
+            fmt_parts.append("%INFO/AC")
+            available_stats.append("ac")
+        if "ExcHet" in self.vcf_fields["info"]:
+            fmt_parts.append("%INFO/ExcHet")
+            available_stats.append("exhet")
+        fmt_str = "\t".join(fmt_parts) + "\n"
+
+        logger.info("Querying SNP info from subset VCF...")
+        snp_result = subprocess.run(
+            ["bcftools", "query", "-f", fmt_str, subset_vcf],
+            capture_output=True, text=True, check=True
+        )
+
+        def _parse_float(s):
+            s = s.strip()
+            if s in ('.', ''):
+                return np.nan
+            try:
+                return float(s)
+            except ValueError:
+                return np.nan
+
+        # Collect per-field lists (strings/floats — small, no Python-int overhead issue)
+        si_chrom, si_pos, si_ref, si_alt = [], [], [], []
+        si_qual, si_fmissing = [], []
+        si_optional = {k: [] for k in available_stats if k not in ("qual", "f_missing")}
+
+        for line in snp_result.stdout.split('\n'):
+            if not line.strip():
+                continue
+            parts = line.split('\t')
+            if len(parts) < 6:
+                continue
+            try:
+                si_chrom.append(parts[0])
+                si_pos.append(int(parts[1]))
+                si_ref.append(parts[2])
+                si_alt.append(parts[3])
+                si_qual.append(_parse_float(parts[4]))
+                si_fmissing.append(_parse_float(parts[5]))
+            except (IndexError, ValueError):
+                continue
+            idx = 6
+            for key in ("dp", "maf", "ac", "exhet"):
+                if key in si_optional:
+                    si_optional[key].append(_parse_float(parts[idx]) if idx < len(parts) else np.nan)
+                    idx += 1
+
+        n_snps = len(si_chrom)
+        logger.info(f"Extracted info for {n_snps} SNPs")
+
+        # Genotype matrix — pre-allocate int8 array to avoid Python-list overhead.
+        # Encoding: 0=hom-ref, 1=het, 2=hom-alt, -1=missing.
+        logger.info("Extracting genotype matrix...")
+        geno_result = subprocess.run(
+            ["bcftools", "query", "-f", "[%GT\t]\n", subset_vcf],
+            capture_output=True, text=True, check=True
+        )
+        gt_matrix = np.full((n_snps, n_samples), np.nan, dtype=np.int8)
+        row = 0
+        for line in geno_result.stdout.split('\n'):
+            if not line.strip() or row >= n_snps:
+                continue
+            col = 0
+            for gt in line.strip().split('\t'):
+                if not gt or col >= n_samples:
+                    continue
+                if gt in ("0/0", "0|0"):
+                    gt_matrix[row, col] = 0
+                elif gt in ("0/1", "0|1", "1|0", "1/0"):
+                    gt_matrix[row, col] = 1
+                elif gt in ("1/1", "1|1"):
+                    gt_matrix[row, col] = 2
+                # else: already -1
+                col += 1
+            row += 1
+        del geno_result  # free the stdout string
+
+        # Depth matrix (int32; -1 = missing/no-call)
+        dp_matrix = None
+        has_dp_matrix = "DP" in self.vcf_fields["format"]
+        if has_dp_matrix:
+            logger.info("Extracting depth matrix...")
+            dp_result = subprocess.run(
+                ["bcftools", "query", "-f", "[%DP\t]\n", subset_vcf],
+                capture_output=True, text=True, check=True
+            )
+            dp_matrix = np.full((n_snps, n_samples), np.nan, dtype=np.int32)
+            row = 0
+            for line in dp_result.stdout.split('\n'):
+                if not line.strip() or row >= n_snps:
+                    continue
+                col = 0
+                for val in line.strip().split('\t'):
+                    val = val.strip()
+                    if not val or col >= n_samples:
+                        continue
+                    if val != '.':
+                        try:
+                            dp_matrix[row, col] = int(val)
+                        except ValueError:
+                            pass  # stays -1
+                    col += 1
+                row += 1
+            del dp_result
+
+        return {
+            "samples": samples,
+            "n_snps": n_snps,
+            "n_samples": n_samples,
+            "si_chrom": si_chrom,
+            "si_pos": np.array(si_pos, dtype=np.int32),
+            "si_ref": si_ref,
+            "si_alt": si_alt,
+            "si_qual": np.array(si_qual, dtype=np.float64),
+            "si_fmissing": np.array(si_fmissing, dtype=np.float64),
+            "si_optional": {k: np.array(v, dtype=np.float64) for k, v in si_optional.items()},
+            "gt_matrix": gt_matrix,
+            "dp_matrix": dp_matrix,
+            "has_dp_matrix": has_dp_matrix,
+            "available_stats": available_stats,
+        }
+
+    def _export_r_notebook(self):
+        """Export a single HDF5 file and R script for offline analysis.
+
+        Everything is packed into snpsnip_data.h5 (gzip-compressed matrices +
+        all metadata) so only one binary file needs to be transferred between
+        the cluster and the user's laptop.
+        """
+        logger.info("Exporting R notebook data...")
+        d = self._extract_r_matrix_data()
+
+        h5_path = self.output_dir / "snpsnip_data.h5"
+        str_dt = h5py.string_dtype()
+
+        with h5py.File(h5_path, 'w') as h5:
+            h5.attrs["snpsnip_version"] = __version__
+
+            # Top-level scalars / vectors
+            h5.create_dataset("has_dp_matrix",   data=int(d["has_dp_matrix"]))
+            h5.create_dataset("samples",         data=np.array(d["samples"], dtype=object), dtype=str_dt)
+            h5.create_dataset("available_stats", data=np.array(d["available_stats"], dtype=object), dtype=str_dt)
+
+            # Sample stats
+            ss = self.state["sample_stats"]
+            sg = h5.create_group("sample_stats")
+            sg.create_dataset("id",           data=np.array([s["id"] for s in ss], dtype=object), dtype=str_dt)
+            sg.create_dataset("missing_rate", data=np.array([s.get("missing_rate", np.nan) for s in ss]))
+            sg.create_dataset("mean_depth",   data=np.array([s.get("mean_depth",   np.nan) for s in ss]))
+            sg.create_dataset("het_rate",     data=np.array([s.get("het_rate",     np.nan) for s in ss]))
+
+            # PCA
+            pca_state = self.state["pca"]
+            n_comp = pca_state["n_components"]
+            pca_samples = [pt["sample"] for pt in pca_state["samples"]]
+            pca_coords  = np.array(
+                [[pt.get(f"pc{i+1}", 0.0) for i in range(n_comp)] for pt in pca_state["samples"]]
+            )  # shape (n_samples, n_components)
+            pg = h5.create_group("pca")
+            pg.create_dataset("samples",            data=np.array(pca_samples, dtype=object), dtype=str_dt)
+            pg.create_dataset("coordinates",        data=pca_coords)
+            pg.create_dataset("variance_explained", data=np.array(pca_state["variance_explained"]))
+
+            # SNP info
+            sig = h5.create_group("snp_info")
+            sig.create_dataset("chrom",     data=np.array(d["si_chrom"], dtype=object), dtype=str_dt)
+            sig.create_dataset("pos",       data=d["si_pos"])
+            sig.create_dataset("ref",       data=np.array(d["si_ref"], dtype=object), dtype=str_dt)
+            sig.create_dataset("alt",       data=np.array(d["si_alt"], dtype=object), dtype=str_dt)
+            sig.create_dataset("qual",      data=d["si_qual"])
+            sig.create_dataset("f_missing", data=d["si_fmissing"])
+            for key, arr in d["si_optional"].items():
+                sig.create_dataset(key, data=arr)
+
+            # Genotype matrix: int8, gzip+shuffle compressed
+            # Shape (n_snps, n_samples); R reads as (n_samples, n_snps) due to
+            # C/Fortran ordering difference — the R script applies t() to fix this.
+            kw = dict(compression="gzip", compression_opts=4, shuffle=True, chunks=True)
+            h5.create_dataset("gt_matrix", data=d["gt_matrix"], **kw)
+
+            if d["has_dp_matrix"] and d["dp_matrix"] is not None:
+                h5.create_dataset("dp_matrix", data=d["dp_matrix"], **kw)
+
+        logger.info(f"Written: {h5_path}")
+
+        template_path = Path(__file__).parent / "templates" / "snpsnip_analysis.R"
+        r_script_path = self.output_dir / "snpsnip_analysis.R"
+        with open(template_path, 'r') as f:
+            r_script_content = f.read()
+        with open(r_script_path, 'w') as f:
+            f.write(r_script_content)
+        logger.info(f"Written: {r_script_path}")
+
+        logger.info(f"\nR notebook data exported to: {self.output_dir}/")
+        logger.info(f"  - snpsnip_data.h5      (all data: metadata + compressed matrices)")
+        logger.info(f"  - snpsnip_analysis.R   (R/quarto analysis script)")
+        logger.info(f"\nRequires R package: install.packages(\"hdf5r\")")
+        logger.info(f"\nNext steps:")
+        logger.info(f"  1. Copy snpsnip_data.h5 and snpsnip_analysis.R to your laptop")
+        logger.info(f"  2. Open snpsnip_analysis.R in RStudio, or run: quarto render snpsnip_analysis.R")
+        logger.info(f"  3. Follow instructions in the script to define groups and set thresholds")
+        logger.info(f"  4. The script writes snpsnip_selections.json — copy it back to the cluster")
+        logger.info(f"  5. Run: snpsnip --vcf {self.vcf_file} --output-dir {self.output_dir} --next snpsnip_selections.json")
+
     def run(self):
         """Main execution flow."""
         if self.state["stage"] == "init":
@@ -587,6 +825,10 @@ class SNPSnip:
             self._compute_pca()
             self.state["stage"] = "ready_for_sample_filtering"
             self._save_state()
+
+        if self.r_notebook and self.state["stage"] == "ready_for_sample_filtering":
+            self._export_r_notebook()
+            return
 
         if self.state["stage"] == "sample_filtered":
             logger.info("Processing variant statistics...")
@@ -1084,19 +1326,15 @@ class SNPSnip:
             else:
                 logger.warning(f"INFO/DP field not found in VCF - skipping depth statistics for group {group_name}")
 
-            # Allele frequency (optional - requires INFO/AF)
-            af_file = None
-            if 'AF' in self.vcf_fields['info']:
-                af_file = str(self.temp_dir / f"{group_name}_af.txt")
-                self.run_bcftools_pipeline(
-                    input_file=group_vcf,
-                    output_file=af_file,
-                    pipeline_cmds=[["bcftools", "query", "-f", "%INFO/AF\n"]],
-                    merge_cmd=["cat"],
-                    check=False
-                )
-            else:
-                logger.warning(f"INFO/AF field not found in VCF - skipping allele frequency statistics for group {group_name}")
+            # Minor allele frequency (always present after fill-tags)
+            maf_file = str(self.temp_dir / f"{group_name}_maf.txt")
+            self.run_bcftools_pipeline(
+                input_file=group_vcf,
+                output_file=maf_file,
+                pipeline_cmds=[["bcftools", "query", "-f", "%INFO/MAF\n"]],
+                merge_cmd=["cat"],
+                check=False
+            )
 
             # Missing rate (always calculatable with F_MISSING)
             missing_file = str(self.temp_dir / f"{group_name}_missing.txt")
@@ -1159,16 +1397,15 @@ class SNPSnip:
                                 pass
                     stats["depth"] = self._compute_histogram(depths)
 
-                # Allele frequency (optional)
-                if af_file:
-                    afs = []
-                    with open(af_file, 'r') as f:
-                        for line in f:
-                            try:
-                                afs.append(float(line.strip()))
-                            except ValueError:
-                                pass
-                    stats["af"] = self._compute_histogram(afs)
+                # Minor allele frequency (always present)
+                mafs = []
+                with open(maf_file, 'r') as f:
+                    for line in f:
+                        try:
+                            mafs.append(float(line.strip()))
+                        except ValueError:
+                            pass
+                stats["maf"] = self._compute_histogram(mafs)
 
                 # Missing rate (required)
                 missing_rates = []
@@ -1308,17 +1545,14 @@ class SNPSnip:
                 else:
                     logger.warning(f"Skipping depth filter for group {group_name} - INFO/DP field not available")
 
-            # Allele frequency (optional - requires INFO/AF)
-            if "af" in group_filters:
-                if 'AF' in self.vcf_fields['info']:
-                    min_af = group_filters["af"].get("min")
-                    max_af = group_filters["af"].get("max")
-                    if min_af is not None:
-                        filter_expressions.append(f"INFO/AF>={min_af}")
-                    if max_af is not None:
-                        filter_expressions.append(f"INFO/AF<={max_af}")
-                else:
-                    logger.warning(f"Skipping allele frequency filter for group {group_name} - INFO/AF field not available")
+            # Minor allele frequency (always present after fill-tags)
+            if "maf" in group_filters:
+                min_maf = group_filters["maf"].get("min")
+                max_maf = group_filters["maf"].get("max")
+                if min_maf is not None:
+                    filter_expressions.append(f"INFO/MAF>={min_maf}")
+                if max_maf is not None:
+                    filter_expressions.append(f"INFO/MAF<={max_maf}")
 
             # Missing rate (always calculatable)
             if "missing" in group_filters:
@@ -1420,6 +1654,8 @@ def main():
 
     # Offline mode options
     parser.add_argument("--offline", action="store_true", help="Run in offline mode (generate static HTML)")
+    parser.add_argument("--r-notebook", action="store_true",
+        help="Export R notebook data for offline analysis (generates snpsnip_rdata.json and snpsnip_analysis.R)")
     parser.add_argument("--next", help="JSON file with selections from previous step (for offline mode)")
 
     # Initial filtering options

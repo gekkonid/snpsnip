@@ -208,7 +208,7 @@ class SNPSnipIntegrationTest(unittest.TestCase):
         group_stats = state["variant_stats"]["all_samples"]
         self.assertIn("qual", group_stats, "Should have quality stats")
         self.assertIn("depth", group_stats, "Should have depth stats")
-        self.assertIn("af", group_stats, "Should have AF stats")
+        self.assertIn("maf", group_stats, "Should have MAF stats")
 
         # Verify HTML was generated
         html_file = os.path.join(self.output_dir, "variant_filtering.html")
@@ -220,7 +220,7 @@ class SNPSnipIntegrationTest(unittest.TestCase):
                 "all_samples": {
                     "qual": {"min": 30, "max": None},
                     "depth": {"min": 50, "max": None},
-                    "af": {"min": 0.1, "max": None}
+                    "maf": {"min": 0.1, "max": None}
                 }
             }
         }
@@ -293,12 +293,12 @@ class SNPSnipIntegrationTest(unittest.TestCase):
                 "group_A": {
                     "qual": {"min": 35, "max": None},
                     "depth": {"min": 60, "max": None},
-                    "af": {"min": 0.15, "max": None}
+                    "maf": {"min": 0.15, "max": None}
                 },
                 "group_B": {
                     "qual": {"min": 30, "max": None},
                     "depth": {"min": 50, "max": None},
-                    "af": {"min": 0.1, "max": 0.4}
+                    "maf": {"min": 0.1, "max": 0.4}
                 }
             }
         }

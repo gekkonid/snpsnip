@@ -456,7 +456,7 @@
                         state.variantThresholds[groupName] = {
                             qual: { min: null, max: null },
                             depth: { min: null, max: null },
-                            af: { min: null, max: null },
+                            maf: { min: null, max: null },
                             missing: { min: null, max: null },
                             exhet: { min: null, max: null },
                             ac: { min: null, max: null }
@@ -1706,15 +1706,15 @@
                     metricsRow.appendChild(depthDiv);
                 }
                 
-                // Allele frequency
-                if (groupStats.af) {
+                // Minor allele frequency
+                if (groupStats.maf) {
                     const afDiv = createMetricCard(
-                        'Allele Frequency',
-                        groupStats.af,
-                        `${groupName}-af`,
+                        'Minor Allele Frequency (MAF)',
+                        groupStats.maf,
+                        `${groupName}-maf`,
                         (min, max) => {
-                            state.variantThresholds[groupName].af.min = min;
-                            state.variantThresholds[groupName].af.max = max;
+                            state.variantThresholds[groupName].maf.min = min;
+                            state.variantThresholds[groupName].maf.max = max;
                         }
                     );
                     metricsRow.appendChild(afDiv);
