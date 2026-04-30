@@ -229,6 +229,131 @@ def process_region(region, input_file, temp_dir, pipeline_cmds, check=True, filt
             logger.error(e.stderr)
         return region, None
 
+
+def _count_alt_alleles(gt_str):
+    """Count alt alleles in a genotype string.
+
+    Args:
+        gt_str: Genotype string like "0/0", "0|1", "1/2", "./.", etc.
+
+    Returns:
+        int: Number of alt alleles (0=hom-ref, 1=het, 2=hom-alt),
+             or -1 if missing/invalid.
+    """
+    if not gt_str or gt_str == '.':
+        return -1
+
+    # Check for missing genotype patterns
+    if gt_str in ('./.', '.|.'):
+        return -1
+
+    # Split by separator (/ or |)
+    alleles = gt_str.replace('|', '/').split('/')
+
+    # Check if any allele is missing
+    if any(a == '.' for a in alleles):
+        return -1
+
+    try:
+        allele_ints = [int(a) for a in alleles]
+    except ValueError:
+        return -1
+
+    # Count non-reference alleles (allele > 0)
+    # For biallelic: 0/0->0, 0/1->1, 1/1->2
+    # For multi-allelic: count alt alleles, cap at 2 for PCA/R matrix purposes
+    alt_count = sum(1 for a in allele_ints if a > 0)
+    return min(alt_count, 2)
+
+
+def _parse_gt_matrix(data, n_snps, n_samples, source='string', dtype=np.int8, missing_sentinel=-1):
+    """Parse genotype matrix from bcftools query output.
+
+    Args:
+        data: bcftools query stdout string or file path
+        n_snps: Expected number of SNPs (rows)
+        n_samples: Expected number of samples (columns)
+        source: 'string' if data is a string, 'file' if data is a file path
+        dtype: numpy dtype for output array (int8 for sentinel, float for NaN)
+        missing_sentinel: Value to use for missing genotypes (used when dtype is int)
+
+    Returns:
+        numpy array of shape (n_snps, n_samples) with genotype values.
+        Encoding: 0=hom-ref, 1=het, 2=hom-alt, missing_sentinel/NaN=missing.
+    """
+    if np.issubdtype(dtype, np.integer):
+        gt_matrix = np.full((n_snps, n_samples), missing_sentinel, dtype=dtype)
+    else:
+        gt_matrix = np.full((n_snps, n_samples), np.nan, dtype=dtype)
+
+    if source == 'string':
+        lines = data.split('\n')
+    else:
+        with open(data, 'r') as f:
+            lines = f.readlines()
+
+    row = 0
+    for line in lines:
+        if not line.strip() or row >= n_snps:
+            continue
+        col = 0
+        for gt in line.strip().split('\t'):
+            if col >= n_samples:
+                break
+            if gt:
+                val = _count_alt_alleles(gt)
+                if val >= 0:
+                    if np.issubdtype(dtype, np.integer):
+                        gt_matrix[row, col] = val
+                    else:
+                        gt_matrix[row, col] = float(val)
+            col += 1
+        row += 1
+
+    return gt_matrix
+
+
+def _parse_dp_matrix(data, n_snps, n_samples, source='string'):
+    """Parse depth matrix from bcftools query output.
+
+    Args:
+        data: bcftools query stdout string or file path
+        n_snps: Expected number of SNPs (rows)
+        n_samples: Expected number of samples (columns)
+        source: 'string' if data is a string, 'file' if data is a file path
+
+    Returns:
+        numpy array of shape (n_snps, n_samples) with depth values.
+        Encoding: -1 = missing, otherwise integer depth.
+    """
+    dp_matrix = np.full((n_snps, n_samples), -1, dtype=np.int32)
+
+    if source == 'string':
+        lines = data.split('\n')
+    else:
+        with open(data, 'r') as f:
+            lines = f.readlines()
+
+    row = 0
+    for line in lines:
+        if not line.strip() or row >= n_snps:
+            continue
+        col = 0
+        for val in line.strip().split('\t'):
+            if col >= n_samples:
+                break
+            val = val.strip()
+            if val and val != '.':
+                try:
+                    dp_matrix[row, col] = int(val)
+                except ValueError:
+                    pass  # stays -1
+            col += 1
+        row += 1
+
+    return dp_matrix
+
+
 # Constants
 DEFAULT_PORT = 2790
 DEFAULT_HOST = "localhost"
@@ -662,34 +787,17 @@ class SNPSnip:
         n_snps = len(si_chrom)
         logger.info(f"Extracted info for {n_snps} SNPs")
 
-        # Genotype matrix — pre-allocate int8 array to avoid Python-list overhead.
+        # Genotype matrix — use shared parser.
         # Encoding: 0=hom-ref, 1=het, 2=hom-alt, -1=missing.
         logger.info("Extracting genotype matrix...")
         geno_result = subprocess.run(
             ["bcftools", "query", "-f", "[%GT\t]\n", subset_vcf],
             capture_output=True, text=True, check=True
         )
-        gt_matrix = np.full((n_snps, n_samples), -1, dtype=np.int8)
-        row = 0
-        for line in geno_result.stdout.split('\n'):
-            if not line.strip() or row >= n_snps:
-                continue
-            col = 0
-            for gt in line.strip().split('\t'):
-                if not gt or col >= n_samples:
-                    continue
-                if gt in ("0/0", "0|0"):
-                    gt_matrix[row, col] = 0
-                elif gt in ("0/1", "0|1", "1|0", "1/0"):
-                    gt_matrix[row, col] = 1
-                elif gt in ("1/1", "1|1"):
-                    gt_matrix[row, col] = 2
-                # else: already -1
-                col += 1
-            row += 1
+        gt_matrix = _parse_gt_matrix(geno_result.stdout, n_snps, n_samples, source='string', dtype=np.int8)
         del geno_result  # free the stdout string
 
-        # Depth matrix (int32; -1 = missing/no-call)
+        # Depth matrix (int32; -1 = missing/no-call) — use shared parser
         dp_matrix = None
         has_dp_matrix = "DP" in self.vcf_fields["format"]
         if has_dp_matrix:
@@ -698,23 +806,7 @@ class SNPSnip:
                 ["bcftools", "query", "-f", "[%DP\t]\n", subset_vcf],
                 capture_output=True, text=True, check=True
             )
-            dp_matrix = np.full((n_snps, n_samples), -1, dtype=np.int32)
-            row = 0
-            for line in dp_result.stdout.split('\n'):
-                if not line.strip() or row >= n_snps:
-                    continue
-                col = 0
-                for val in line.strip().split('\t'):
-                    val = val.strip()
-                    if not val or col >= n_samples:
-                        continue
-                    if val != '.':
-                        try:
-                            dp_matrix[row, col] = int(val)
-                        except ValueError:
-                            pass  # stays -1
-                    col += 1
-                row += 1
+            dp_matrix = _parse_dp_matrix(dp_result.stdout, n_snps, n_samples, source='string')
             del dp_result
 
         return {
@@ -1210,27 +1302,11 @@ class SNPSnip:
         samples_result = self._run_bcftools(["query", "-l", subset_vcf])
         samples = samples_result.stdout.strip().split('\n')
 
-        # Parse genotype matrix
+        # Parse genotype matrix using shared parser (float dtype for NaN imputation)
         try:
-            # Read genotype data
-            geno_matrix = []
-            with open(geno_file, 'r') as f:
-                for line in f:
-                    row = []
-                    for gt in line.strip().split('\t'):
-                        # Convert genotype to numeric value (0, 1, 2)
-                        if gt in ("0/0", "0|0"):
-                            row.append(0)
-                        elif gt in ("0/1", "0|1", "1|0", "1/0"):
-                            row.append(1)
-                        elif gt in ("1/1", "1|1"):
-                            row.append(2)
-                        else:
-                            row.append(np.nan)  # Missing or other genotypes
-                    geno_matrix.append(row)
-
-            # Convert to numpy array
-            geno_array = np.array(geno_matrix, dtype=float).T  # Transpose to have samples as rows
+            n_snps = sum(1 for line in open(geno_file) if line.strip())
+            n_samples = len(samples)
+            geno_array = _parse_gt_matrix(geno_file, n_snps, n_samples, source='file', dtype=float).T
 
             # Impute missing values with mean
             for i in range(geno_array.shape[0]):
