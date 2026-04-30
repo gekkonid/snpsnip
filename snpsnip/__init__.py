@@ -669,7 +669,7 @@ class SNPSnip:
             ["bcftools", "query", "-f", "[%GT\t]\n", subset_vcf],
             capture_output=True, text=True, check=True
         )
-        gt_matrix = np.full((n_snps, n_samples), np.nan, dtype=np.int8)
+        gt_matrix = np.full((n_snps, n_samples), -1, dtype=np.int8)
         row = 0
         for line in geno_result.stdout.split('\n'):
             if not line.strip() or row >= n_snps:
@@ -698,7 +698,7 @@ class SNPSnip:
                 ["bcftools", "query", "-f", "[%DP\t]\n", subset_vcf],
                 capture_output=True, text=True, check=True
             )
-            dp_matrix = np.full((n_snps, n_samples), np.nan, dtype=np.int32)
+            dp_matrix = np.full((n_snps, n_samples), -1, dtype=np.int32)
             row = 0
             for line in dp_result.stdout.split('\n'):
                 if not line.strip() or row >= n_snps:
@@ -1088,7 +1088,7 @@ class SNPSnip:
             )
             self.state["subset_vcf"] = filled_vcf
         else:
-            print(f"WARNING! reusing {filled_vcf} as it exists. Please remove the output dir if you want to start afresh", file=sys.stderr)
+            logger.warning(f"reusing {filled_vcf} as it exists. Please remove the output dir if you want to start afresh")
 
         # Validate that subset contains enough SNPs
         logger.info("Validating subset VCF SNP count...")
@@ -1182,7 +1182,6 @@ class SNPSnip:
             missing_rate = nmissing / nsite if nsite > 0 else 0
             het_rate = nhet / ncall if ncall > 0 else 0
             if sample in sample_stats:
-                print(sample, nsite, ncall, missing_rate, het_rate, mean_depth, sep="\t")
                 sample_stats[sample]["missing_rate"] = missing_rate
                 sample_stats[sample]["mean_depth"] = mean_depth
                 sample_stats[sample]["het_rate"] = het_rate
