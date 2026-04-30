@@ -25,7 +25,7 @@ import uuid
 import base64
 import webbrowser
 from concurrent.futures import ProcessPoolExecutor
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 
@@ -1079,14 +1079,16 @@ class SNPSnip:
            ["bcftools", "+fill-tags", '-Ov', "--", "-t", "all,F_MISSING"],
            ["awk", f'/^#/ {{print; next}} {{if (rand() < {self.subset_freq}) print}}'],
         ]
-        self.run_bcftools_pipeline(
-            input_file=self.vcf_file,
-            output_file=filled_vcf,
-            pipeline_cmds=commands,
-            filters=filters,
-        )
-
-        self.state["subset_vcf"] = filled_vcf
+        if not (self.state.get("subset_vcf") == filled_vcf and Path(filled_vcf).exists()):
+            self.run_bcftools_pipeline(
+                input_file=self.vcf_file,
+                output_file=filled_vcf,
+                pipeline_cmds=commands,
+                filters=filters,
+            )
+            self.state["subset_vcf"] = filled_vcf
+        else:
+            print(f"WARNING! reusing {filled_vcf} as it exists. Please remove the output dir if you want to start afresh", file=sys.stderr)
 
         # Validate that subset contains enough SNPs
         logger.info("Validating subset VCF SNP count...")
@@ -1151,6 +1153,7 @@ class SNPSnip:
         # Parse stats files
         sample_stats = {sample: {"id": sample} for sample in self.samples}
 
+        blockwise_stats = defaultdict(lambda: defaultdict(int))
         # Process missing data
         try:
             with open(missing_file, 'r') as f:
@@ -1160,16 +1163,29 @@ class SNPSnip:
                         sample = parts[2]
                         nrefhom, nalthom, nhet, nts, ntv, nindel, mean_depth, nsingle, nhapref, nhapalt, nmissing = map(float, parts[3:14])
                         ncall = nrefhom + nalthom + nhet + nindel + nsingle + nhapref + nhapalt
-                        missing_rate = nmissing / ncall if ncall > 0 else 0
-                        # Calculate heterozygosity rate
-                        het_rate = nhet / ncall if ncall > 0 else 0
-                        if sample in sample_stats:
-                            sample_stats[sample]["missing_rate"] = missing_rate
-                            sample_stats[sample]["mean_depth"] = mean_depth
-                            sample_stats[sample]["het_rate"] = het_rate
+                        nsite = ncall + nmissing
+                        blockwise_stats[sample]["ncall"] += ncall
+                        blockwise_stats[sample]["nsite"] += nsite
+                        blockwise_stats[sample]["nmissing"] += nmissing
+                        blockwise_stats[sample]["nhet"] += nhet
+                        blockwise_stats[sample]["wdepth"] += nsite * mean_depth
         except Exception as e:
             logger.error(f"Error processing missing data: {e}")
             raise e
+
+        for sample, dat in blockwise_stats.items():
+            ncall = dat["ncall"]
+            nsite = dat["nsite"]
+            nmissing = dat["nmissing"]
+            nhet = dat["nhet"]
+            mean_depth = dat["wdepth"] / nsite # weighted mean
+            missing_rate = nmissing / nsite if nsite > 0 else 0
+            het_rate = nhet / ncall if ncall > 0 else 0
+            if sample in sample_stats:
+                print(sample, nsite, ncall, missing_rate, het_rate, mean_depth, sep="\t")
+                sample_stats[sample]["missing_rate"] = missing_rate
+                sample_stats[sample]["mean_depth"] = mean_depth
+                sample_stats[sample]["het_rate"] = het_rate
 
         self.state["sample_stats"] = list(sample_stats.values())
 
